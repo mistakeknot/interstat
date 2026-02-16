@@ -1,0 +1,1 @@
+{"type":"assistant","message":{"role":"assistant","content":"Architecture review","model":"claude-opus-4-6","usage":{"input_tokens":20000,"output_tokens":10000,"cache_read_input_tokens":12000,"cache_creation_input_tokens":3000}},"sessionId":"test-session-1","agentId":"fd-arch","timestamp":"2026-02-16T10:01:30Z","uuid":"sa3"}
