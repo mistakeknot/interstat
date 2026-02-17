@@ -1,0 +1,15 @@
+{
+  "module_summary": "Interstat measures token consumption, workflow efficiency, and decision cost across agent sessions.",
+  "roadmap": {
+    "now": [
+      {"id": "ISTA-N1", "title": "Finalize baseline token metric schema aligned to interphase and Clavain decisions.", "priority": "P1"}
+    ],
+    "next": [
+      {"id": "ISTA-N2", "title": "Enable workload-level attribution for high-cost sub-agents.", "priority": "P2"},
+      {"id": "ISTA-N3", "title": "Export dashboards for trend-based routing optimization pilots.", "priority": "P2"},
+      {"id": "ISTA-L1", "title": "Add model-provider normalization and cross-run comparability.", "priority": "P2"}
+    ],
+    "later": [
+    ]
+  }
+}
