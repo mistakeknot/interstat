@@ -1,8 +1,10 @@
 {
   "name": "interstat",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Token efficiency benchmarking for agent workflows",
-  "author": "MK",
+  "author": {
+    "name": "MK"
+  },
   "hooks": "./hooks/hooks.json",
   "skills": [
     "./skills/report.md",
