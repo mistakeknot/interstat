@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     session_id TEXT NOT NULL,
     agent_name TEXT NOT NULL,
     invocation_id TEXT,
+    subagent_type TEXT,
+    description TEXT,
     wall_clock_ms INTEGER,
     result_length INTEGER,
     input_tokens INTEGER,
@@ -31,10 +33,19 @@ CREATE TABLE IF NOT EXISTS agent_runs (
 CREATE INDEX IF NOT EXISTS idx_agent_runs_session ON agent_runs(session_id);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_agent ON agent_runs(agent_name);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_timestamp ON agent_runs(timestamp);
+SQL
 
-CREATE VIEW IF NOT EXISTS v_agent_summary AS
+# Schema v2 migration: add subagent_type and description columns to existing tables
+sqlite3 "$DB" "ALTER TABLE agent_runs ADD COLUMN subagent_type TEXT;" 2>/dev/null || true
+sqlite3 "$DB" "ALTER TABLE agent_runs ADD COLUMN description TEXT;" 2>/dev/null || true
+sqlite3 "$DB" "CREATE INDEX IF NOT EXISTS idx_agent_runs_subagent_type ON agent_runs(subagent_type);" 2>/dev/null || true
+
+# Recreate views to use COALESCE(subagent_type, agent_name) as display_name
+sqlite3 "$DB" <<'SQL'
+DROP VIEW IF EXISTS v_agent_summary;
+CREATE VIEW v_agent_summary AS
 SELECT
-    agent_name,
+    COALESCE(subagent_type, agent_name) as agent_name,
     COUNT(*) as runs,
     ROUND(AVG(input_tokens)) as avg_input,
     ROUND(AVG(output_tokens)) as avg_output,
@@ -44,9 +55,10 @@ SELECT
     model
 FROM agent_runs
 WHERE total_tokens IS NOT NULL
-GROUP BY agent_name, model;
+GROUP BY COALESCE(subagent_type, agent_name), model;
 
-CREATE VIEW IF NOT EXISTS v_invocation_summary AS
+DROP VIEW IF EXISTS v_invocation_summary;
+CREATE VIEW v_invocation_summary AS
 SELECT
     invocation_id,
     session_id,
@@ -60,7 +72,7 @@ FROM agent_runs
 WHERE invocation_id IS NOT NULL
 GROUP BY invocation_id;
 
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 SQL
 
 echo "interstat: database initialized at $DB"

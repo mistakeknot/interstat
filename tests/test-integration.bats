@@ -111,7 +111,7 @@ teardown() {
   bash "$PLUGIN_DIR/scripts/init-db.sh" >/dev/null 2>&1
   bash "$PLUGIN_DIR/scripts/init-db.sh" >/dev/null 2>&1
   version=$(sqlite3 "$TEST_DB" "PRAGMA user_version")
-  [ "$version" = "1" ]
+  [ "$version" = "2" ]
 }
 
 # --- Empty State ---

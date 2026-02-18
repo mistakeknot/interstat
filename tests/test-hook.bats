@@ -49,6 +49,17 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
+@test "hook writes subagent_type column" {
+  run bash "$HOOK_SCRIPT" <<< '{"session_id":"test-type","tool_name":"Task","tool_input":{"subagent_type":"Explore","prompt":"test","description":"Find files"},"tool_output":"done"}'
+  [ "$status" -eq 0 ]
+
+  type="$(sqlite3 "$TEST_DB" "SELECT subagent_type FROM agent_runs WHERE session_id='test-type'")"
+  [ "$type" = "Explore" ]
+
+  desc="$(sqlite3 "$TEST_DB" "SELECT description FROM agent_runs WHERE session_id='test-type'")"
+  [ "$desc" = "Find files" ]
+}
+
 @test "hook exits 0 when DB directory is missing" {
   rm -rf "$HOME/.claude/interstat"
   run bash "$HOOK_SCRIPT" <<< '{"session_id":"test-fallback","tool_name":"Task","tool_input":{"subagent_type":"test"},"tool_output":"x"}'

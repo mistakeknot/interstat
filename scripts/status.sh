@@ -45,6 +45,6 @@ echo ""
 echo "--- Recent Runs (last 5) ---"
 printf "%-22s %-25s %-10s %s\n" "Timestamp" "Agent" "Tokens" "Status"
 echo "----------------------------------------------------------------------"
-sqlite3 -separator '|' "$DB" "SELECT timestamp, agent_name, COALESCE(total_tokens, ''), CASE WHEN parsed_at IS NOT NULL THEN 'parsed' WHEN total_tokens IS NOT NULL THEN 'parsed' ELSE 'pending' END FROM agent_runs ORDER BY timestamp DESC LIMIT 5" | while IFS='|' read -r ts agent tokens status; do
+sqlite3 -separator '|' "$DB" "SELECT timestamp, COALESCE(subagent_type, agent_name), COALESCE(total_tokens, ''), CASE WHEN parsed_at IS NOT NULL THEN 'parsed' WHEN total_tokens IS NOT NULL THEN 'parsed' ELSE 'pending' END FROM agent_runs ORDER BY timestamp DESC LIMIT 5" | while IFS='|' read -r ts agent tokens status; do
   printf "%-22s %-25s %-10s %s\n" "${ts:0:19}" "$agent" "${tokens:-—}" "$status"
 done

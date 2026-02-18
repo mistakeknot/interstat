@@ -234,35 +234,39 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
 
 
 def upsert_agent_run(conn: sqlite3.Connection, run: dict[str, object], parsed_at: str) -> None:
+    # Match strategy: find the hook-inserted row for this session+agent first.
+    # The hook writes subagent_type (e.g., "Explore") as agent_name.
+    # The parser derives agent_name from the JSONL filename (e.g., "a76c7a5").
+    # We try multiple match strategies to find the right row to update.
+
+    # Strategy 1: exact match by session_id + agent_name (hash from filename), unparsed
     existing = conn.execute(
-        """
-        SELECT id
-        FROM agent_runs
-        WHERE session_id = ? AND agent_name = ? AND parsed_at IS NULL
-        ORDER BY id DESC
-        LIMIT 1
-        """,
+        "SELECT id FROM agent_runs WHERE session_id = ? AND agent_name = ? AND parsed_at IS NULL ORDER BY id DESC LIMIT 1",
         (run["session_id"], run["agent_name"]),
     ).fetchone()
 
-    # Keep parser idempotent when run repeatedly without pre-seeded NULL rows.
+    # Strategy 2: exact match by session_id + agent_name (hash), already parsed (idempotent re-run)
     if existing is None:
         existing = conn.execute(
-            """
-            SELECT id
-            FROM agent_runs
-            WHERE session_id = ? AND agent_name = ?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
+            "SELECT id FROM agent_runs WHERE session_id = ? AND agent_name = ? ORDER BY id DESC LIMIT 1",
             (run["session_id"], run["agent_name"]),
         ).fetchone()
 
+    # Strategy 3: match hook-inserted row where subagent_type is set but agent_name differs
+    # (hook writes subagent_type as agent_name; parser would create a duplicate without this)
+    if existing is None:
+        existing = conn.execute(
+            "SELECT id FROM agent_runs WHERE session_id = ? AND subagent_type IS NOT NULL AND parsed_at IS NULL ORDER BY id DESC LIMIT 1",
+            (run["session_id"],),
+        ).fetchone()
+
     if existing is not None:
+        # Update token data but NEVER overwrite subagent_type — the hook's value is authoritative
         conn.execute(
             """
             UPDATE agent_runs
             SET timestamp = ?,
+                agent_name = ?,
                 input_tokens = ?,
                 output_tokens = ?,
                 cache_read_tokens = ?,
@@ -274,6 +278,7 @@ def upsert_agent_run(conn: sqlite3.Connection, run: dict[str, object], parsed_at
             """,
             (
                 run["timestamp"],
+                run["agent_name"],
                 run["input_tokens"],
                 run["output_tokens"],
                 run["cache_read_tokens"],
