@@ -3,3 +3,4 @@
 *.db-shm
 __pycache__/
 .venv/
+.clavain/
