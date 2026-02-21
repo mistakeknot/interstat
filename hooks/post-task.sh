@@ -33,7 +33,10 @@ if [ -z "${result_length}" ]; then
 fi
 
 mkdir -p "$DATA_DIR" >/dev/null 2>&1 || true
-bash "$INIT_DB_SCRIPT" >/dev/null 2>&1 || true
+# Only run full init if DB doesn't exist or schema is outdated (user_version < 2)
+if [[ ! -f "$DB_PATH" ]] || [[ "$(sqlite3 "$DB_PATH" 'PRAGMA user_version;' 2>/dev/null)" != "2" ]]; then
+    bash "$INIT_DB_SCRIPT" >/dev/null 2>&1 || true
+fi
 
 insert_status=0
 sqlite3 "$DB_PATH" <<SQL >/dev/null 2>&1 || insert_status=$?
