@@ -2,7 +2,7 @@
 
 Token efficiency benchmarking for Claude Code.
 
-## What This Does
+## What this does
 
 interstat answers the question "am I actually using tokens efficiently or just burning through context?" It captures tool usage events in real-time via a PostToolUse:Task hook, backfills token data from JSONL transcripts at session end, and produces reports with percentiles and a decision gate.
 
@@ -46,8 +46,8 @@ Deep analysis of usage patterns:
 
 ```
 hooks/
-  post-tool-use.sh    PostToolUse:Task — real-time event capture to SQLite
-  session-end.sh      SessionEnd — JSONL parsing for token backfill
+  post-tool-use.sh    PostToolUse:Task: real-time event capture to SQLite
+  session-end.sh      SessionEnd: JSONL parsing for token backfill
 skills/
   report/             Percentile analysis with decision gate
   status/             Current session snapshot
