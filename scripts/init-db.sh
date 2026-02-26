@@ -27,12 +27,16 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     cache_creation_tokens INTEGER,
     total_tokens INTEGER,
     model TEXT,
-    parsed_at TEXT
+    parsed_at TEXT,
+    bead_id TEXT DEFAULT '',
+    phase TEXT DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_runs_session ON agent_runs(session_id);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_agent ON agent_runs(agent_name);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_timestamp ON agent_runs(timestamp);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_bead ON agent_runs(bead_id);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_phase ON agent_runs(phase);
 SQL
 
 # Schema v2 migration: add subagent_type and description columns to existing tables
@@ -74,5 +78,11 @@ GROUP BY invocation_id;
 
 PRAGMA user_version = 2;
 SQL
+
+# Schema v3 migration: add bead_id and phase columns for cost baseline correlation
+sqlite3 "$DB" "ALTER TABLE agent_runs ADD COLUMN bead_id TEXT DEFAULT '';" 2>/dev/null || true
+sqlite3 "$DB" "ALTER TABLE agent_runs ADD COLUMN phase TEXT DEFAULT '';" 2>/dev/null || true
+sqlite3 "$DB" "CREATE INDEX IF NOT EXISTS idx_agent_runs_bead ON agent_runs(bead_id);" 2>/dev/null || true
+sqlite3 "$DB" "CREATE INDEX IF NOT EXISTS idx_agent_runs_phase ON agent_runs(phase);" 2>/dev/null || true
 
 echo "interstat: database initialized at $DB"

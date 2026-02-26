@@ -32,6 +32,14 @@ if [ -z "${result_length}" ]; then
   result_length=0
 fi
 
+# Capture bead context for cost baseline correlation
+bead_id="${CLAVAIN_BEAD_ID:-}"
+phase=""
+if [[ -n "$bead_id" ]]; then
+    phase_file="/tmp/interstat-phase-${bead_id}"
+    [[ -f "$phase_file" ]] && phase=$(cat "$phase_file" 2>/dev/null || echo "")
+fi
+
 mkdir -p "$DATA_DIR" >/dev/null 2>&1 || true
 # Only run full init if DB doesn't exist or schema is outdated (user_version < 2)
 if [[ ! -f "$DB_PATH" ]] || [[ "$(sqlite3 "$DB_PATH" 'PRAGMA user_version;' 2>/dev/null)" != "2" ]]; then
@@ -48,7 +56,9 @@ INSERT INTO agent_runs (
   subagent_type,
   description,
   invocation_id,
-  result_length
+  result_length,
+  bead_id,
+  phase
 ) VALUES (
   '$(printf "%s" "$timestamp" | sed "s/'/''/g")',
   '$(printf "%s" "$session_id" | sed "s/'/''/g")',
@@ -56,7 +66,9 @@ INSERT INTO agent_runs (
   $(if [ -n "$subagent_type" ]; then printf "'%s'" "$(printf "%s" "$subagent_type" | sed "s/'/''/g")"; else printf "NULL"; fi),
   $(if [ -n "$description" ]; then printf "'%s'" "$(printf "%s" "$description" | sed "s/'/''/g")"; else printf "NULL"; fi),
   '$(printf "%s" "$invocation_id" | sed "s/'/''/g")',
-  ${result_length}
+  ${result_length},
+  '$(printf "%s" "$bead_id" | sed "s/'/''/g")',
+  '$(printf "%s" "$phase" | sed "s/'/''/g")'
 );
 SQL
 
