@@ -57,7 +57,9 @@ case "$mode" in
             SELECT bead_id, phase,
                    COALESCE(NULLIF(subagent_type,''),'main') as agent,
                    COUNT(*) as runs,
-                   COALESCE(SUM(total_tokens),0) as tokens
+                   COALESCE(SUM(total_tokens),0) as tokens,
+                   COALESCE(SUM(input_tokens),0) as input_tokens,
+                   COALESCE(SUM(output_tokens),0) as output_tokens
             FROM agent_runs
             WHERE bead_id != '' AND total_tokens > 0
             GROUP BY bead_id, phase, agent
