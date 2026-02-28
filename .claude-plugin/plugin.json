@@ -6,6 +6,8 @@
     "name": "MK"
   },
   "skills": [
-    "./skills"
+    "./skills/analyze",
+    "./skills/report",
+    "./skills/status"
   ]
 }
