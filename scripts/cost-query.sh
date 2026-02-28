@@ -2,18 +2,65 @@
 # Declared interface for cross-layer token queries against interstat DB.
 # Used by: ic cost baseline (L1), Galiana analyze.py (L2)
 #
-# Usage: cost-query.sh <mode>
+# Usage: cost-query.sh <mode> [options]
 #   aggregate       Total tokens by agent type
 #   by-bead         Tokens grouped by bead_id
 #   by-phase        Tokens grouped by phase
 #   by-bead-phase   Tokens grouped by bead_id + phase + agent
 #   session-count   Count of sessions with token data
+#   per-session     Tokens per session with time range
+#   cost-usd        USD cost by model (API pricing)
+#   baseline        North star: cost-per-landable-change
+#
+# Options for 'baseline':
+#   --repo=<path>   Git repo for commit counting (default: cwd or INTERSTAT_REPO)
 set -euo pipefail
 
 DB="$HOME/.claude/interstat/metrics.db"
 [[ -f "$DB" ]] || { echo "[]"; exit 0; }
 
 mode="${1:-aggregate}"
+shift || true
+
+# Parse options
+REPO_PATH="${INTERSTAT_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+for arg in "$@"; do
+    case "$arg" in
+        --repo=*) REPO_PATH="${arg#--repo=}" ;;
+    esac
+done
+
+# USD pricing per million tokens (API rates, Feb 2026)
+# Used by cost-usd and baseline modes
+usd_cost_query() {
+    sqlite3 -json "$DB" "
+        SELECT model,
+               COUNT(*) as runs,
+               COALESCE(SUM(input_tokens),0) as input_tokens,
+               COALESCE(SUM(output_tokens),0) as output_tokens,
+               COALESCE(SUM(total_tokens),0) as total_tokens,
+               ROUND(
+                   COALESCE(SUM(input_tokens),0) *
+                   CASE
+                       WHEN model LIKE '%opus-4%' THEN 15.0 / 1000000
+                       WHEN model LIKE '%sonnet-4%' THEN 3.0 / 1000000
+                       WHEN model LIKE '%haiku-4%' THEN 1.0 / 1000000
+                       ELSE 3.0 / 1000000
+                   END
+                   +
+                   COALESCE(SUM(output_tokens),0) *
+                   CASE
+                       WHEN model LIKE '%opus-4%' THEN 75.0 / 1000000
+                       WHEN model LIKE '%sonnet-4%' THEN 15.0 / 1000000
+                       WHEN model LIKE '%haiku-4%' THEN 5.0 / 1000000
+                       ELSE 15.0 / 1000000
+                   END
+               , 4) as cost_usd
+        FROM agent_runs
+        WHERE total_tokens > 0 AND model IS NOT NULL AND model != ''
+        GROUP BY model
+        ORDER BY cost_usd DESC"
+}
 
 case "$mode" in
     aggregate)
@@ -73,9 +120,131 @@ case "$mode" in
             FROM agent_runs
             WHERE total_tokens > 0"
         ;;
+    per-session)
+        sqlite3 -json "$DB" "
+            SELECT session_id,
+                   MIN(timestamp) as start_time,
+                   MAX(timestamp) as end_time,
+                   COUNT(*) as runs,
+                   COALESCE(SUM(total_tokens),0) as total_tokens,
+                   COALESCE(SUM(input_tokens),0) as input_tokens,
+                   COALESCE(SUM(output_tokens),0) as output_tokens
+            FROM agent_runs
+            WHERE total_tokens > 0
+            GROUP BY session_id
+            ORDER BY start_time"
+        ;;
+    cost-usd)
+        usd_cost_query
+        ;;
+    baseline)
+        # North star metric: cost per landable change
+        # Correlates session token data with git commits during session windows
+
+        # Get session time ranges from DB
+        sessions_json=$(sqlite3 -json "$DB" "
+            SELECT session_id,
+                   MIN(timestamp) as start_time,
+                   MAX(timestamp) as end_time,
+                   COALESCE(SUM(input_tokens),0) as input_tokens,
+                   COALESCE(SUM(output_tokens),0) as output_tokens,
+                   COALESCE(SUM(total_tokens),0) as total_tokens,
+                   GROUP_CONCAT(DISTINCT model) as models
+            FROM agent_runs
+            WHERE total_tokens > 0
+            GROUP BY session_id
+            ORDER BY start_time")
+
+        # Get total USD cost
+        total_usd=$(sqlite3 "$DB" "
+            SELECT ROUND(
+                SUM(
+                    COALESCE(input_tokens,0) *
+                    CASE
+                        WHEN model LIKE '%opus-4%' THEN 15.0 / 1000000
+                        WHEN model LIKE '%sonnet-4%' THEN 3.0 / 1000000
+                        WHEN model LIKE '%haiku-4%' THEN 1.0 / 1000000
+                        ELSE 3.0 / 1000000
+                    END
+                    +
+                    COALESCE(output_tokens,0) *
+                    CASE
+                        WHEN model LIKE '%opus-4%' THEN 75.0 / 1000000
+                        WHEN model LIKE '%sonnet-4%' THEN 15.0 / 1000000
+                        WHEN model LIKE '%haiku-4%' THEN 5.0 / 1000000
+                        ELSE 15.0 / 1000000
+                    END
+                )
+            , 4)
+            FROM agent_runs
+            WHERE total_tokens > 0 AND model IS NOT NULL AND model != ''")
+
+        # Count commits in each session window
+        total_commits=0
+        session_count=$(echo "$sessions_json" | jq 'length')
+        for i in $(seq 0 $((session_count - 1))); do
+            start=$(echo "$sessions_json" | jq -r ".[$i].start_time")
+            end=$(echo "$sessions_json" | jq -r ".[$i].end_time")
+            # Add 1 hour buffer after last activity for commits
+            commits=$(git -C "$REPO_PATH" log --oneline --after="$start" --before="$end" 2>/dev/null | wc -l | tr -d '[:space:]')
+            total_commits=$((total_commits + commits))
+        done
+
+        # Also count commits outside strict session windows but on the same day
+        first_session=$(echo "$sessions_json" | jq -r '.[0].start_time')
+        last_session=$(echo "$sessions_json" | jq -r '.[-1].end_time')
+        all_day_commits=$(git -C "$REPO_PATH" log --oneline --after="$first_session" --before="$last_session" 2>/dev/null | wc -l | tr -d '[:space:]')
+
+        total_tokens=$(echo "$sessions_json" | jq '[.[].total_tokens] | add')
+        total_input=$(echo "$sessions_json" | jq '[.[].input_tokens] | add')
+        total_output=$(echo "$sessions_json" | jq '[.[].output_tokens] | add')
+
+        # Calculate per-change metrics
+        if [[ "$total_commits" -gt 0 ]]; then
+            tokens_per_change=$((total_tokens / total_commits))
+            usd_per_change=$(awk "BEGIN{printf \"%.4f\", $total_usd / $total_commits}")
+        else
+            tokens_per_change=0
+            usd_per_change="0.0000"
+        fi
+
+        jq -n \
+            --argjson sessions "$session_count" \
+            --argjson total_tokens "$total_tokens" \
+            --argjson total_input "$total_input" \
+            --argjson total_output "$total_output" \
+            --argjson total_usd "$total_usd" \
+            --argjson commits_in_sessions "$total_commits" \
+            --argjson commits_all_day "$all_day_commits" \
+            --argjson tokens_per_change "$tokens_per_change" \
+            --arg usd_per_change "$usd_per_change" \
+            --arg first_session "$first_session" \
+            --arg last_session "$last_session" \
+            '{
+                measurement_window: {
+                    first_session: $first_session,
+                    last_session: $last_session,
+                    sessions: $sessions
+                },
+                tokens: {
+                    total: $total_tokens,
+                    input: $total_input,
+                    output: $total_output
+                },
+                cost_usd: $total_usd,
+                commits: {
+                    in_session_windows: $commits_in_sessions,
+                    in_full_range: $commits_all_day
+                },
+                north_star: {
+                    tokens_per_landable_change: $tokens_per_change,
+                    usd_per_landable_change: ($usd_per_change | tonumber)
+                }
+            }'
+        ;;
     *)
         echo "Unknown mode: $mode" >&2
-        echo "Usage: cost-query.sh {aggregate|by-bead|by-phase|by-bead-phase|session-count}" >&2
+        echo "Usage: cost-query.sh {aggregate|by-bead|by-phase|by-bead-phase|session-count|per-session|cost-usd|baseline}" >&2
         exit 1
         ;;
 esac

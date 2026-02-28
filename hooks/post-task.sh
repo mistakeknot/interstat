@@ -33,7 +33,14 @@ if [ -z "${result_length}" ]; then
 fi
 
 # Capture bead context for cost baseline correlation
-bead_id="${CLAVAIN_BEAD_ID:-}"
+# Try session-scoped file first (written by Clavain route/work skills),
+# fall back to env var for backward compat
+bead_id=""
+bead_context_file="/tmp/interstat-bead-${session_id}"
+if [[ -n "$session_id" && -f "$bead_context_file" ]]; then
+    bead_id=$(cat "$bead_context_file" 2>/dev/null || echo "")
+fi
+[[ -z "$bead_id" ]] && bead_id="${CLAVAIN_BEAD_ID:-}"
 phase=""
 if [[ -n "$bead_id" ]]; then
     phase_file="/tmp/interstat-phase-${bead_id}"

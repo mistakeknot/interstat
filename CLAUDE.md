@@ -13,11 +13,12 @@ bash scripts/init-db.sh          # Initialize SQLite database
 
 ## Data Flow
 
-1. SessionStart hook → writes bead phase to `/tmp/interstat-phase-${bead_id}`
-2. PostToolUse:Task hook → SQLite INSERT with bead_id + phase (real-time event capture)
-3. SessionEnd hook → JSONL parser → SQLite UPDATE (token backfill)
-4. Report/Status skills → SQLite queries → terminal output
-5. `ic cost baseline` → queries via `scripts/cost-query.sh` (cross-layer interface)
+1. SessionStart hook → writes bead context to `/tmp/interstat-bead-{session_id}` + phase to `/tmp/interstat-phase-{bead_id}`
+2. Clavain route/work skills → call `scripts/set-bead-context.sh` to register bead after claiming
+3. PostToolUse:Task hook → SQLite INSERT with bead_id + phase (real-time event capture)
+4. SessionEnd hook → JSONL parser → SQLite UPDATE (token backfill)
+5. Report/Status skills → SQLite queries → terminal output
+6. `ic cost baseline` → queries via `scripts/cost-query.sh` (cross-layer interface)
 
 ## Cross-Layer Interface
 
@@ -28,8 +29,18 @@ bash scripts/cost-query.sh by-bead          # Tokens grouped by bead_id
 bash scripts/cost-query.sh by-phase         # Tokens grouped by phase
 bash scripts/cost-query.sh by-bead-phase    # Tokens grouped by bead_id + phase + agent
 bash scripts/cost-query.sh session-count    # Count sessions with token data
+bash scripts/cost-query.sh per-session      # Tokens per session with time range
+bash scripts/cost-query.sh cost-usd         # USD cost by model (API pricing)
+bash scripts/cost-query.sh baseline         # North star: cost-per-landable-change
 ```
-All modes output JSON arrays via `sqlite3 -json`.
+All modes output JSON. `baseline` mode correlates git commits with token data.
+
+## Bead Context Protocol
+
+Hooks read bead_id from `/tmp/interstat-bead-{session_id}` (session-scoped). To register:
+```bash
+bash scripts/set-bead-context.sh <session_id> <bead_id> [phase]
+```
 
 ## Database
 

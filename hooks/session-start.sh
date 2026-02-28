@@ -4,8 +4,16 @@
 # stale data when sessions span multiple beads.
 set -euo pipefail
 
+INPUT=$(cat)
+session_id="$(printf '%s' "$INPUT" | jq -r '(.session_id // "")' 2>/dev/null || printf '')"
+
 bead_id="${CLAVAIN_BEAD_ID:-}"
 [[ -n "$bead_id" ]] || exit 0
+
+# Write bead context keyed by session_id so post-task.sh can find it
+if [[ -n "$session_id" ]]; then
+    echo "$bead_id" > "/tmp/interstat-bead-${session_id}" 2>/dev/null || true
+fi
 
 phase_file="/tmp/interstat-phase-${bead_id}"
 # Only write if file doesn't exist (avoid overwriting mid-session phase changes)
