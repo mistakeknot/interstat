@@ -12,6 +12,10 @@
 #   cost-usd        USD cost by model (API pricing)
 #   baseline        North star: cost-per-landable-change
 #
+# Global options (apply to all modes):
+#   --since=<ISO>   Filter to runs after this timestamp (e.g. 2026-03-01T00:00:00Z)
+#   --bead=<id>     Filter to runs for a specific bead_id
+#
 # Options for 'baseline':
 #   --repo=<path>   Git repo for commit counting (default: cwd or INTERSTAT_REPO)
 set -euo pipefail
@@ -24,15 +28,38 @@ shift || true
 
 # Parse options
 REPO_PATH="${INTERSTAT_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+SINCE=""
+BEAD_FILTER=""
 for arg in "$@"; do
     case "$arg" in
         --repo=*) REPO_PATH="${arg#--repo=}" ;;
+        --since=*) SINCE="${arg#--since=}" ;;
+        --bead=*) BEAD_FILTER="${arg#--bead=}" ;;
     esac
 done
+
+# Build optional WHERE clause fragments for --since and --bead filters
+_extra_where() {
+    local clauses=""
+    if [[ -n "$SINCE" ]]; then
+        # Validate ISO timestamp format before SQL interpolation
+        if [[ "$SINCE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2} ]]; then
+            clauses="$clauses AND timestamp > '$SINCE'"
+        fi
+    fi
+    if [[ -n "$BEAD_FILTER" ]]; then
+        if [[ "$BEAD_FILTER" =~ ^[a-zA-Z0-9_.:-]+$ ]]; then
+            clauses="$clauses AND bead_id = '$BEAD_FILTER'"
+        fi
+    fi
+    echo "$clauses"
+}
 
 # USD pricing per million tokens (API rates, Feb 2026)
 # Used by cost-usd and baseline modes
 usd_cost_query() {
+    local extra
+    extra="$(_extra_where)"
     sqlite3 -json "$DB" "
         SELECT model,
                COUNT(*) as runs,
@@ -58,9 +85,12 @@ usd_cost_query() {
                , 4) as cost_usd
         FROM agent_runs
         WHERE total_tokens > 0 AND model IS NOT NULL AND model != ''
+              ${extra}
         GROUP BY model
         ORDER BY cost_usd DESC"
 }
+
+extra="$(_extra_where)"
 
 case "$mode" in
     aggregate)
@@ -71,7 +101,7 @@ case "$mode" in
                    COALESCE(SUM(input_tokens),0) as input_tokens,
                    COALESCE(SUM(output_tokens),0) as output_tokens
             FROM agent_runs
-            WHERE total_tokens > 0
+            WHERE total_tokens > 0 ${extra}
             GROUP BY agent
             ORDER BY tokens DESC"
         ;;
@@ -83,7 +113,7 @@ case "$mode" in
                    COALESCE(SUM(input_tokens),0) as input_tokens,
                    COALESCE(SUM(output_tokens),0) as output_tokens
             FROM agent_runs
-            WHERE bead_id != '' AND total_tokens > 0
+            WHERE bead_id != '' AND total_tokens > 0 ${extra}
             GROUP BY bead_id
             ORDER BY tokens DESC"
         ;;
@@ -95,7 +125,7 @@ case "$mode" in
                    COALESCE(SUM(input_tokens),0) as input_tokens,
                    COALESCE(SUM(output_tokens),0) as output_tokens
             FROM agent_runs
-            WHERE phase != '' AND total_tokens > 0
+            WHERE phase != '' AND total_tokens > 0 ${extra}
             GROUP BY phase
             ORDER BY tokens DESC"
         ;;
@@ -108,7 +138,7 @@ case "$mode" in
                    COALESCE(SUM(input_tokens),0) as input_tokens,
                    COALESCE(SUM(output_tokens),0) as output_tokens
             FROM agent_runs
-            WHERE bead_id != '' AND total_tokens > 0
+            WHERE bead_id != '' AND total_tokens > 0 ${extra}
             GROUP BY bead_id, phase, agent
             ORDER BY bead_id, tokens DESC"
         ;;
@@ -118,7 +148,7 @@ case "$mode" in
                    COUNT(*) as runs,
                    COALESCE(SUM(total_tokens),0) as total_tokens
             FROM agent_runs
-            WHERE total_tokens > 0"
+            WHERE total_tokens > 0 ${extra}"
         ;;
     per-session)
         sqlite3 -json "$DB" "
@@ -130,7 +160,7 @@ case "$mode" in
                    COALESCE(SUM(input_tokens),0) as input_tokens,
                    COALESCE(SUM(output_tokens),0) as output_tokens
             FROM agent_runs
-            WHERE total_tokens > 0
+            WHERE total_tokens > 0 ${extra}
             GROUP BY session_id
             ORDER BY start_time"
         ;;
