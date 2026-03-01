@@ -7,6 +7,12 @@ set -euo pipefail
 INPUT=$(cat)
 session_id="$(printf '%s' "$INPUT" | jq -r '(.session_id // "")' 2>/dev/null || printf '')"
 
+# Persist session_id so downstream skills (route, sprint) can call set-bead-context.sh
+# after claiming a bead mid-session — session_id is only available in hook JSON payloads
+if [[ -n "$session_id" ]]; then
+    echo "$session_id" > "/tmp/interstat-session-id" 2>/dev/null || true
+fi
+
 bead_id="${CLAVAIN_BEAD_ID:-}"
 [[ -n "$bead_id" ]] || exit 0
 

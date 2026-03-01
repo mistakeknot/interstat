@@ -13,8 +13,8 @@ bash scripts/init-db.sh          # Initialize SQLite database
 
 ## Data Flow
 
-1. SessionStart hook → writes bead context to `/tmp/interstat-bead-{session_id}` + phase to `/tmp/interstat-phase-{bead_id}`
-2. Clavain route/work skills → call `scripts/set-bead-context.sh` to register bead after claiming
+1. SessionStart hook → persists `session_id` to `/tmp/interstat-session-id` + writes bead context if `CLAVAIN_BEAD_ID` is set
+2. Clavain route/sprint commands → write `/tmp/interstat-bead-{session_id}` after claiming a bead (reads session_id from `/tmp/interstat-session-id`)
 3. PostToolUse:Task hook → SQLite INSERT with bead_id + phase (real-time event capture)
 4. SessionEnd hook → JSONL parser → SQLite UPDATE (token backfill)
 5. Report/Status skills → SQLite queries → terminal output
