@@ -31,6 +31,7 @@ bash scripts/cost-query.sh by-bead-phase    # Tokens grouped by bead_id + phase 
 bash scripts/cost-query.sh session-count    # Count sessions with token data
 bash scripts/cost-query.sh per-session      # Tokens per session with time range
 bash scripts/cost-query.sh cost-usd         # USD cost by model (API pricing)
+bash scripts/cost-query.sh cost-snapshot    # Full cost snapshot for a bead (requires --bead=)
 bash scripts/cost-query.sh baseline         # North star: cost-per-landable-change
 ```
 All modes output JSON. `baseline` mode correlates git commits with token data.

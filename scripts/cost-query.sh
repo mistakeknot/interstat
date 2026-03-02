@@ -10,6 +10,7 @@
 #   session-count   Count of sessions with token data
 #   per-session     Tokens per session with time range
 #   cost-usd        USD cost by model (API pricing)
+#   cost-snapshot   Full cost snapshot for a bead (requires --bead=)
 #   baseline        North star: cost-per-landable-change
 #
 # Global options (apply to all modes):
@@ -167,6 +168,33 @@ case "$mode" in
     cost-usd)
         usd_cost_query
         ;;
+    cost-snapshot)
+        # Full cost snapshot for a bead — requires --bead=
+        if [[ -z "$BEAD_FILTER" ]]; then
+            echo '{"error":"--bead= required for cost-snapshot mode"}' >&2
+            exit 1
+        fi
+        by_model=$(usd_cost_query)
+        [[ -z "$by_model" || "$by_model" == "[]" ]] && by_model="[]"
+        total_usd=$(echo "$by_model" | jq '[.[].cost_usd] | add // 0')
+        phases_seen=$(sqlite3 -json "$DB" "
+            SELECT DISTINCT phase FROM agent_runs
+            WHERE phase != '' AND bead_id = '$BEAD_FILTER'
+            ORDER BY phase" 2>/dev/null | jq '[.[].phase]' 2>/dev/null || echo '[]')
+        jq -n \
+            --arg bead_id "$BEAD_FILTER" \
+            --arg captured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson total_cost_usd "$total_usd" \
+            --argjson by_model "$by_model" \
+            --argjson phases_seen "$phases_seen" \
+            '{
+                bead_id: $bead_id,
+                captured_at: $captured_at,
+                total_cost_usd: $total_cost_usd,
+                by_model: $by_model,
+                phases_seen: $phases_seen
+            }'
+        ;;
     baseline)
         # North star metric: cost per landable change
         # Correlates session token data with git commits during session windows
@@ -274,7 +302,7 @@ case "$mode" in
         ;;
     *)
         echo "Unknown mode: $mode" >&2
-        echo "Usage: cost-query.sh {aggregate|by-bead|by-phase|by-bead-phase|session-count|per-session|cost-usd|baseline}" >&2
+        echo "Usage: cost-query.sh {aggregate|by-bead|by-phase|by-bead-phase|session-count|per-session|cost-usd|cost-snapshot|baseline}" >&2
         exit 1
         ;;
 esac
