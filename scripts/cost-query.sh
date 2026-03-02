@@ -6,6 +6,7 @@
 #   aggregate       Total tokens by agent type
 #   by-bead         Tokens grouped by bead_id
 #   by-phase        Tokens grouped by phase
+#   by-phase-model  Tokens grouped by phase + model
 #   by-bead-phase   Tokens grouped by bead_id + phase + agent
 #   session-count   Count of sessions with token data
 #   per-session     Tokens per session with time range
@@ -129,6 +130,19 @@ case "$mode" in
             WHERE phase != '' AND total_tokens > 0 ${extra}
             GROUP BY phase
             ORDER BY tokens DESC"
+        ;;
+    by-phase-model)
+        sqlite3 -json "$DB" "
+            SELECT phase, model,
+                   COUNT(*) as runs,
+                   COALESCE(SUM(total_tokens),0) as tokens,
+                   COALESCE(SUM(input_tokens),0) as input_tokens,
+                   COALESCE(SUM(output_tokens),0) as output_tokens
+            FROM agent_runs
+            WHERE phase != '' AND total_tokens > 0
+                  AND model IS NOT NULL AND model != '' ${extra}
+            GROUP BY phase, model
+            ORDER BY phase, tokens DESC"
         ;;
     by-bead-phase)
         sqlite3 -json "$DB" "
@@ -302,7 +316,7 @@ case "$mode" in
         ;;
     *)
         echo "Unknown mode: $mode" >&2
-        echo "Usage: cost-query.sh {aggregate|by-bead|by-phase|by-bead-phase|session-count|per-session|cost-usd|cost-snapshot|baseline}" >&2
+        echo "Usage: cost-query.sh {aggregate|by-bead|by-phase|by-phase-model|by-bead-phase|session-count|per-session|cost-usd|cost-snapshot|baseline}" >&2
         exit 1
         ;;
 esac

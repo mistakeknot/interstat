@@ -27,6 +27,7 @@ bash scripts/init-db.sh          # Initialize SQLite database
 bash scripts/cost-query.sh aggregate        # Total tokens by agent type
 bash scripts/cost-query.sh by-bead          # Tokens grouped by bead_id
 bash scripts/cost-query.sh by-phase         # Tokens grouped by phase
+bash scripts/cost-query.sh by-phase-model   # Tokens grouped by phase + model
 bash scripts/cost-query.sh by-bead-phase    # Tokens grouped by bead_id + phase + agent
 bash scripts/cost-query.sh session-count    # Count sessions with token data
 bash scripts/cost-query.sh per-session      # Tokens per session with time range
