@@ -18,4 +18,10 @@ fi
   cd "${SCRIPT_DIR}/.." && uv run "$ANALYZE_SCRIPT" --session "$SESSION_ID" --force
 ) </dev/null >/dev/null 2>&1 &
 
+# Classify tool selection failures for this session (iv-rttr5)
+CLASSIFY_SCRIPT="${SCRIPT_DIR}/../scripts/classify-failures.py"
+if [ -f "$CLASSIFY_SCRIPT" ]; then
+  python3 "$CLASSIFY_SCRIPT" --session-id="$SESSION_ID" </dev/null >/dev/null 2>&1 &
+fi
+
 exit 0

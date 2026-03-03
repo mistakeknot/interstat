@@ -85,4 +85,29 @@ sqlite3 "$DB" "ALTER TABLE agent_runs ADD COLUMN phase TEXT DEFAULT '';" 2>/dev/
 sqlite3 "$DB" "CREATE INDEX IF NOT EXISTS idx_agent_runs_bead ON agent_runs(bead_id);" 2>/dev/null || true
 sqlite3 "$DB" "CREATE INDEX IF NOT EXISTS idx_agent_runs_phase ON agent_runs(phase);" 2>/dev/null || true
 
+# Schema v4 migration: tool_selection_events table for failure classification
+sqlite3 "$DB" <<'SQL'
+CREATE TABLE IF NOT EXISTS tool_selection_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    seq INTEGER NOT NULL DEFAULT 0,
+    tool_name TEXT NOT NULL,
+    tool_input_summary TEXT,
+    outcome TEXT NOT NULL DEFAULT 'success',
+    error_message TEXT,
+    failure_category TEXT,
+    failure_signals TEXT,
+    preceding_tool TEXT,
+    retry_of_seq INTEGER,
+    bead_id TEXT DEFAULT '',
+    phase TEXT DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_tse_session ON tool_selection_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_tse_category ON tool_selection_events(failure_category);
+CREATE INDEX IF NOT EXISTS idx_tse_tool ON tool_selection_events(tool_name);
+CREATE INDEX IF NOT EXISTS idx_tse_outcome ON tool_selection_events(outcome);
+SQL
+
 echo "interstat: database initialized at $DB"
