@@ -13,6 +13,11 @@ if [ -z "$SESSION_ID" ] || [ "$SESSION_ID" = "null" ]; then
   exit 0
 fi
 
+# Record session end in kernel ledger (iv-30zy3)
+if command -v ic &>/dev/null; then
+  ic session end --session="$SESSION_ID" 2>/dev/null || true
+fi
+
 # Run parser in background for just this session — non-blocking
 (
   cd "${SCRIPT_DIR}/.." && uv run "$ANALYZE_SCRIPT" --session "$SESSION_ID" --force

@@ -11,6 +11,11 @@ session_id="$(printf '%s' "$INPUT" | jq -r '(.session_id // "")' 2>/dev/null || 
 # after claiming a bead mid-session — session_id is only available in hook JSON payloads
 if [[ -n "$session_id" ]]; then
     echo "$session_id" > "/tmp/interstat-session-id" 2>/dev/null || true
+
+    # Dual-write to kernel session ledger (iv-30zy3)
+    if command -v ic &>/dev/null; then
+        ic session start --session="$session_id" --project="$(pwd)" --agent-type="${CLAUDE_AGENT_TYPE:-claude-code}" 2>/dev/null || true
+    fi
 fi
 
 bead_id="${CLAVAIN_BEAD_ID:-}"
@@ -34,4 +39,10 @@ if command -v ic &>/dev/null && command -v bd &>/dev/null; then
 fi
 
 echo "$phase" > "$phase_file" 2>/dev/null || true
+
+# Dual-write attribution to kernel session ledger (iv-30zy3)
+if command -v ic &>/dev/null && [[ -n "$session_id" ]]; then
+    ic session attribute --session="$session_id" --bead="$bead_id" ${phase:+--phase="$phase"} 2>/dev/null || true
+fi
+
 exit 0
