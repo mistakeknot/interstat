@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Declared interface for cross-layer token queries against interstat DB.
 # Used by: ic cost baseline (L1), Galiana analyze.py (L2)
+# Baseline mode uses `ic landed summary` (canonical landed_changes table) with git-log fallback.
 #
 # Usage: cost-query.sh <mode> [options]
 #   aggregate       Total tokens by agent type
@@ -211,23 +212,29 @@ case "$mode" in
         ;;
     baseline)
         # North star metric: cost per landable change
-        # Correlates session token data with git commits during session windows
+        # Primary: queries canonical landed_changes via `ic landed summary`
+        # Fallback: session-window git log counting (legacy, for unrecorded history)
 
-        # Get session time ranges from DB
-        sessions_json=$(sqlite3 -json "$DB" "
-            SELECT session_id,
-                   MIN(timestamp) as start_time,
-                   MAX(timestamp) as end_time,
+        # --- Token & cost data (from interstat DB) ---
+        extra="$(_extra_where)"
+
+        tokens_json=$(sqlite3 -json "$DB" "
+            SELECT COUNT(DISTINCT session_id) as session_count,
                    COALESCE(SUM(input_tokens),0) as input_tokens,
                    COALESCE(SUM(output_tokens),0) as output_tokens,
                    COALESCE(SUM(total_tokens),0) as total_tokens,
-                   GROUP_CONCAT(DISTINCT model) as models
+                   MIN(timestamp) as first_session,
+                   MAX(timestamp) as last_session
             FROM agent_runs
-            WHERE total_tokens > 0
-            GROUP BY session_id
-            ORDER BY start_time")
+            WHERE total_tokens > 0 $extra")
 
-        # Get total USD cost
+        session_count=$(echo "$tokens_json" | jq -r '.[0].session_count // 0')
+        total_tokens=$(echo "$tokens_json" | jq -r '.[0].total_tokens // 0')
+        total_input=$(echo "$tokens_json" | jq -r '.[0].input_tokens // 0')
+        total_output=$(echo "$tokens_json" | jq -r '.[0].output_tokens // 0')
+        first_session=$(echo "$tokens_json" | jq -r '.[0].first_session // ""')
+        last_session=$(echo "$tokens_json" | jq -r '.[0].last_session // ""')
+
         total_usd=$(sqlite3 "$DB" "
             SELECT ROUND(
                 SUM(
@@ -249,27 +256,27 @@ case "$mode" in
                 )
             , 4)
             FROM agent_runs
-            WHERE total_tokens > 0 AND model IS NOT NULL AND model != ''")
+            WHERE total_tokens > 0 AND model IS NOT NULL AND model != '' $extra")
 
-        # Count commits in each session window
-        total_commits=0
-        session_count=$(echo "$sessions_json" | jq 'length')
-        for i in $(seq 0 $((session_count - 1))); do
-            start=$(echo "$sessions_json" | jq -r ".[$i].start_time")
-            end=$(echo "$sessions_json" | jq -r ".[$i].end_time")
-            # Add 1 hour buffer after last activity for commits
-            commits=$(git -C "$REPO_PATH" log --oneline --after="$start" --before="$end" 2>/dev/null | wc -l | tr -d '[:space:]')
-            total_commits=$((total_commits + commits))
-        done
+        # --- Landed change count (from ic landed, with git-log fallback) ---
+        source="ic_landed"
+        ic_args=("--json")
+        [[ -n "$REPO_PATH" ]] && ic_args+=("--project=$REPO_PATH")
+        [[ -n "$BEAD_FILTER" ]] && ic_args+=("--bead=$BEAD_FILTER")
+        [[ -n "$SINCE" ]] && ic_args+=("--since=$SINCE")
 
-        # Also count commits outside strict session windows but on the same day
-        first_session=$(echo "$sessions_json" | jq -r '.[0].start_time')
-        last_session=$(echo "$sessions_json" | jq -r '.[-1].end_time')
-        all_day_commits=$(git -C "$REPO_PATH" log --oneline --after="$first_session" --before="$last_session" 2>/dev/null | wc -l | tr -d '[:space:]')
+        if command -v ic >/dev/null 2>&1; then
+            landed_json=$(ic landed summary "${ic_args[@]}" 2>/dev/null) || landed_json=""
+            total_commits=$(echo "$landed_json" | jq -r '.total // 0' 2>/dev/null) || total_commits=0
+        else
+            total_commits=0
+        fi
 
-        total_tokens=$(echo "$sessions_json" | jq '[.[].total_tokens] | add')
-        total_input=$(echo "$sessions_json" | jq '[.[].input_tokens] | add')
-        total_output=$(echo "$sessions_json" | jq '[.[].output_tokens] | add')
+        # Fallback: git-log session-window counting if ic landed has no data
+        if [[ "$total_commits" -eq 0 && -n "$first_session" && "$first_session" != "null" ]]; then
+            source="git_log_fallback"
+            total_commits=$(git -C "$REPO_PATH" log --oneline --after="$first_session" --before="$last_session" 2>/dev/null | wc -l | tr -d '[:space:]')
+        fi
 
         # Calculate per-change metrics
         if [[ "$total_commits" -gt 0 ]]; then
@@ -285,13 +292,13 @@ case "$mode" in
             --argjson total_tokens "$total_tokens" \
             --argjson total_input "$total_input" \
             --argjson total_output "$total_output" \
-            --argjson total_usd "$total_usd" \
-            --argjson commits_in_sessions "$total_commits" \
-            --argjson commits_all_day "$all_day_commits" \
+            --argjson total_usd "${total_usd:-0}" \
+            --argjson landed_changes "$total_commits" \
             --argjson tokens_per_change "$tokens_per_change" \
             --arg usd_per_change "$usd_per_change" \
             --arg first_session "$first_session" \
             --arg last_session "$last_session" \
+            --arg source "$source" \
             '{
                 measurement_window: {
                     first_session: $first_session,
@@ -304,9 +311,9 @@ case "$mode" in
                     output: $total_output
                 },
                 cost_usd: $total_usd,
-                commits: {
-                    in_session_windows: $commits_in_sessions,
-                    in_full_range: $commits_all_day
+                landed_changes: {
+                    count: $landed_changes,
+                    source: $source
                 },
                 north_star: {
                     tokens_per_landable_change: $tokens_per_change,
