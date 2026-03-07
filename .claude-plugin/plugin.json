@@ -1,13 +1,14 @@
 {
   "name": "interstat",
-  "version": "0.2.16",
-  "description": "Token efficiency benchmarking for agent workflows",
+  "version": "0.2.17",
+  "description": "Token efficiency benchmarking and session analytics for agent workflows",
   "author": {
     "name": "MK"
   },
   "skills": [
     "./skills/analyze",
     "./skills/report",
-    "./skills/status"
+    "./skills/status",
+    "./skills/session-search"
   ]
 }
