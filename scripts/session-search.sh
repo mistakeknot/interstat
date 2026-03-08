@@ -1,25 +1,20 @@
 #!/usr/bin/env bash
-# Search indexed session messages.
+# Session analytics and search.
 #
-# Usage:
-#   bash session-search.sh search <query> [--project PROJECT] [--limit N] [--human-only] [--after DATE] [--before DATE]
-#   bash session-search.sh semantic <query> [--project P] [--limit N] [--human-only] [--after DATE] [--before DATE]
-#   bash session-search.sh stats [--project PROJECT] [--after DATE] [--before DATE]
+# Analytics (interstat SQLite — bead-aware, date-filterable):
+#   bash session-search.sh stats [--project P] [--after DATE] [--before DATE]
 #   bash session-search.sh activity [--period week|month|all] [--after DATE] [--before DATE]
 #   bash session-search.sh projects
 #
-# Requires: session-index.py to have been run first.
+# Search (delegates to cass — BM25 + semantic + hybrid):
+#   bash session-search.sh search <query> [--limit N] [--mode hybrid|lexical|semantic]
+#
+# Requires: session-index.py for analytics, cass for search.
 # All output is JSON.
 
 set -euo pipefail
 
 DB="${HOME}/.claude/interstat/sessions.db"
-
-if [[ ! -f "$DB" ]]; then
-    echo '{"error": "sessions.db not found. Run session-index.py first."}'
-    exit 1
-fi
-
 MODE="${1:-help}"
 shift || true
 
@@ -30,6 +25,7 @@ HUMAN_ONLY=""
 PERIOD="all"
 AFTER=""
 BEFORE=""
+SEARCH_MODE="hybrid"
 QUERY=""
 
 while [[ $# -gt 0 ]]; do
@@ -40,46 +36,32 @@ while [[ $# -gt 0 ]]; do
         --period) PERIOD="$2"; shift 2 ;;
         --after) AFTER="$2"; shift 2 ;;
         --before) BEFORE="$2"; shift 2 ;;
+        --mode) SEARCH_MODE="$2"; shift 2 ;;
         *) QUERY="${QUERY:+$QUERY }$1"; shift ;;
     esac
 done
 
-# Build date filters (used across modes)
-DATE_CLAUSE=""
-[[ -n "$AFTER" ]] && DATE_CLAUSE="${DATE_CLAUSE} AND s.session_date >= '$AFTER'"
-[[ -n "$BEFORE" ]] && DATE_CLAUSE="${DATE_CLAUSE} AND s.session_date <= '$BEFORE'"
-
 case "$MODE" in
-    search)
+    search|semantic)
         if [[ -z "$QUERY" ]]; then
             echo '{"error": "No search query provided"}'
             exit 1
         fi
-        PROJECT_FILTER=""
-        [[ -n "$PROJECT" ]] && PROJECT_FILTER="AND m.project = '$PROJECT'"
-        HUMAN_FILTER=""
-        [[ -n "$HUMAN_ONLY" ]] && HUMAN_FILTER="AND m.is_automated = 0"
+        if ! command -v cass > /dev/null 2>&1; then
+            echo '{"error": "cass not installed. Install: curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_session_search/main/install.sh | bash"}'
+            exit 1
+        fi
+        # Map legacy "semantic" mode to cass's mode flag
+        [[ "$MODE" == "semantic" ]] && SEARCH_MODE="semantic"
 
-        sqlite3 -json "$DB" "
-            SELECT m.project, m.session_id,
-                   substr(m.message_text, 1, 300) as message_preview,
-                   m.is_automated,
-                   s.session_date,
-                   s.file_size,
-                   s.indexed_at
-            FROM messages_fts fts
-            JOIN messages m ON m.id = fts.rowid
-            JOIN sessions s ON s.session_id = m.session_id
-            WHERE messages_fts MATCH '$(echo "$QUERY" | sed "s/'/''/g")'
-            $PROJECT_FILTER
-            $HUMAN_FILTER
-            $DATE_CLAUSE
-            ORDER BY fts.rank
-            LIMIT $LIMIT
-        " 2>/dev/null || echo '[]'
+        cass search "$QUERY" --robot --limit "$LIMIT" --mode "$SEARCH_MODE" --fields minimal 2>/dev/null
         ;;
 
     stats)
+        if [[ ! -f "$DB" ]]; then
+            echo '{"error": "sessions.db not found. Run session-index.py first."}'
+            exit 1
+        fi
         STATS_WHERE="WHERE 1=1"
         [[ -n "$PROJECT" ]] && STATS_WHERE="$STATS_WHERE AND m.project = '$PROJECT'"
         [[ -n "$AFTER" ]] && STATS_WHERE="$STATS_WHERE AND s.session_date >= '$AFTER'"
@@ -103,6 +85,10 @@ case "$MODE" in
         ;;
 
     activity)
+        if [[ ! -f "$DB" ]]; then
+            echo '{"error": "sessions.db not found. Run session-index.py first."}'
+            exit 1
+        fi
         ACTIVITY_WHERE="WHERE 1=1"
         case "$PERIOD" in
             week) ACTIVITY_WHERE="$ACTIVITY_WHERE AND s.session_date >= date('now', '-7 days')" ;;
@@ -127,6 +113,10 @@ case "$MODE" in
         ;;
 
     projects)
+        if [[ ! -f "$DB" ]]; then
+            echo '{"error": "sessions.db not found. Run session-index.py first."}'
+            exit 1
+        fi
         sqlite3 -json "$DB" "
             SELECT DISTINCT project, COUNT(*) as sessions
             FROM sessions
@@ -135,36 +125,14 @@ case "$MODE" in
         " 2>/dev/null || echo '[]'
         ;;
 
-    semantic)
-        if [[ -z "$QUERY" ]]; then
-            echo '{"error": "No search query provided"}'
-            exit 1
-        fi
-        SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-        INTERSEARCH_DIR="$(cd "$SCRIPT_DIR/../../intersearch" 2>/dev/null && pwd)"
-
-        if [[ ! -d "$INTERSEARCH_DIR" ]]; then
-            echo '{"error": "intersearch plugin not found at interverse/intersearch"}'
-            exit 1
-        fi
-
-        uv run --directory "$INTERSEARCH_DIR" python3 "$SCRIPT_DIR/session-semantic.py" \
-            --query "$QUERY" --limit "$LIMIT" \
-            ${PROJECT:+--project "$PROJECT"} \
-            ${AFTER:+--after "$AFTER"} \
-            ${BEFORE:+--before "$BEFORE"} \
-            ${HUMAN_ONLY:+--human-only}
-        ;;
-
     help|*)
         cat <<'HELP'
 {"usage": {
-    "search": "session-search.sh search <query> [--project P] [--limit N] [--human-only] [--after DATE] [--before DATE]",
-    "semantic": "session-search.sh semantic <query> [--project P] [--limit N] [--human-only] [--after DATE] [--before DATE]",
+    "search": "session-search.sh search <query> [--limit N] [--mode hybrid|lexical|semantic]",
     "stats": "session-search.sh stats [--project P] [--after DATE] [--before DATE]",
     "activity": "session-search.sh activity [--period week|month|all] [--after DATE] [--before DATE]",
     "projects": "session-search.sh projects",
-    "notes": "DATE format: YYYY-MM-DD. 'semantic' requires intersearch plugin + nomic-embed model."
+    "notes": "Search delegates to cass (install separately). Analytics use interstat sessions.db. DATE format: YYYY-MM-DD."
 }}
 HELP
         ;;

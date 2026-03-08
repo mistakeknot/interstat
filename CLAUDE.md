@@ -49,17 +49,16 @@ bash scripts/set-bead-context.sh <session_id> <bead_id> [phase]
 Search and analyze past Claude Code sessions. Separate from token metrics.
 
 ```bash
-python3 scripts/session-index.py                      # Index sessions (incremental)
-bash scripts/session-search.sh search "query"          # FTS5 keyword search
-bash scripts/session-search.sh semantic "concept"      # Semantic search (via intersearch embeddings)
+python3 scripts/session-index.py                       # Index sessions (incremental)
+cass search "query" --robot --limit 10 --mode hybrid   # Search (via cass)
 bash scripts/session-search.sh stats --after 2026-03-01  # Stats with date filter
 bash scripts/session-search.sh activity --period week  # Activity by period
 ```
 
-- Database: `~/.claude/interstat/sessions.db`
-- Tables: `sessions` (with `session_date`), `messages`, `messages_fts` (FTS5), `message_embeddings` (768d vectors)
-- Semantic search runs via `uv run --directory ../intersearch` to access nomic-embed-text-v1.5
+- Analytics DB: `~/.claude/interstat/sessions.db` (sessions, messages, messages_fts)
+- Search engine: `cass` (external, `~/.local/bin/cass`) — BM25 + semantic hybrid, sub-60ms
 - Date filtering: `--after` and `--before` accept `YYYY-MM-DD`, filter on actual session file dates
+- `session-search.sh search` delegates to `cass --robot`; `stats`/`activity`/`projects` use our SQLite
 
 ## Token Metrics Database
 
