@@ -44,7 +44,24 @@ Hooks read bead_id from `/tmp/interstat-bead-{session_id}` (session-scoped). To 
 bash scripts/set-bead-context.sh <session_id> <bead_id> [phase]
 ```
 
-## Database
+## Session Analytics
+
+Search and analyze past Claude Code sessions. Separate from token metrics.
+
+```bash
+python3 scripts/session-index.py                      # Index sessions (incremental)
+bash scripts/session-search.sh search "query"          # FTS5 keyword search
+bash scripts/session-search.sh semantic "concept"      # Semantic search (via intersearch embeddings)
+bash scripts/session-search.sh stats --after 2026-03-01  # Stats with date filter
+bash scripts/session-search.sh activity --period week  # Activity by period
+```
+
+- Database: `~/.claude/interstat/sessions.db`
+- Tables: `sessions` (with `session_date`), `messages`, `messages_fts` (FTS5), `message_embeddings` (768d vectors)
+- Semantic search runs via `uv run --directory ../intersearch` to access nomic-embed-text-v1.5
+- Date filtering: `--after` and `--before` accept `YYYY-MM-DD`, filter on actual session file dates
+
+## Token Metrics Database
 
 - Location: `~/.claude/interstat/metrics.db`
 - Schema version: 2 (tracked via `PRAGMA user_version`)

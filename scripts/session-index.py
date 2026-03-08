@@ -14,6 +14,7 @@ import os
 import re
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 DB_DIR = Path.home() / ".claude" / "interstat"
@@ -57,6 +58,7 @@ def init_db():
             file_path TEXT NOT NULL,
             file_size INTEGER,
             file_mtime REAL,
+            session_date TEXT,
             message_count INTEGER DEFAULT 0,
             indexed_at TEXT DEFAULT (datetime('now'))
         );
@@ -88,6 +90,10 @@ def init_db():
             INSERT INTO messages_fts(messages_fts, rowid, message_text) VALUES('delete', old.id, old.message_text);
         END;
     """)
+    # Schema migration: add session_date column if missing
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    if "session_date" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN session_date TEXT")
     conn.close()
 
 
@@ -200,11 +206,16 @@ def index_sessions(reindex: bool = False, project_filter: str = None):
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
 
+            # Derive session_date from file mtime
+            session_date = datetime.fromtimestamp(
+                stat.st_mtime, tz=timezone.utc
+            ).strftime("%Y-%m-%d")
+
             # Insert session
             conn.execute(
-                """INSERT INTO sessions (session_id, project, file_path, file_size, file_mtime, message_count)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (session_id, clean_name, str(jsonl_file), stat.st_size, stat.st_mtime, len(messages)),
+                """INSERT INTO sessions (session_id, project, file_path, file_size, file_mtime, session_date, message_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (session_id, clean_name, str(jsonl_file), stat.st_size, stat.st_mtime, session_date, len(messages)),
             )
 
             # Insert messages
