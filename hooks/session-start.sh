@@ -18,6 +18,14 @@ if [[ -n "$session_id" ]]; then
     fi
 fi
 
+# Keep cass index fresh (conditional — only if stale >1 hour, background)
+if command -v cass &>/dev/null; then
+    age=$(cass health --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['state']['index']['age_seconds'])" 2>/dev/null || echo "0")
+    if [[ "$age" -gt 3600 ]]; then
+        cass index --full &>/dev/null &
+    fi
+fi
+
 bead_id="${CLAVAIN_BEAD_ID:-}"
 [[ -n "$bead_id" ]] || exit 0
 

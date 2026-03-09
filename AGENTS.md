@@ -26,22 +26,9 @@ If a high-value change conflicts with philosophy, either:
 
 ## Session Search & Analytics
 
-Search and analytics are split by concern:
+Session search and session-level analytics (stats, activity, projects) have moved to the `intersearch` plugin. Use `/intersearch:session-search` for search, timeline, context, and export.
 
-- **Search** — delegated to [cass](https://github.com/Dicklesworthstone/coding_agent_session_search) (`~/.local/bin/cass`). Rust-native, sub-60ms, BM25 + hash semantic hybrid. Indexes 11+ agent providers including Claude Code.
-  ```bash
-  cass search "query" --robot --limit 10 --mode hybrid   # Agent-consumable JSON
-  cass index --full                                       # Rebuild index
-  cass health --json                                      # Check index freshness
-  ```
-- **Analytics** — interstat's SQLite (`~/.claude/interstat/sessions.db`). Bead-aware, date-filterable aggregations via `session-search.sh`.
-  ```bash
-  bash scripts/session-search.sh stats --after 2026-03-01   # Stats with date filter
-  bash scripts/session-search.sh activity --period week      # Activity by period
-  bash scripts/session-search.sh projects                    # Project distribution
-  ```
-
-The `session_date` column (derived from file mtime) enables `--after`/`--before` date filtering on actual session dates, not indexing time.
+interstat retains bead-correlated token metrics only (per-session token counts, cost-per-bead, phase breakdowns). These are queried via `scripts/cost-query.sh` and the `/interstat:report` skill.
 
 ## Execution Rules
 - Keep changes small, testable, and reversible.

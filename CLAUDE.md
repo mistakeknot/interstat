@@ -46,19 +46,9 @@ bash scripts/set-bead-context.sh <session_id> <bead_id> [phase]
 
 ## Session Analytics
 
-Search and analyze past Claude Code sessions. Separate from token metrics.
+Session search has moved to the `intersearch` plugin (via cass). interstat retains token metrics and bead-aware analytics only.
 
-```bash
-python3 scripts/session-index.py                       # Index sessions (incremental)
-cass search "query" --robot --limit 10 --mode hybrid   # Search (via cass)
-bash scripts/session-search.sh stats --after 2026-03-01  # Stats with date filter
-bash scripts/session-search.sh activity --period week  # Activity by period
-```
-
-- Analytics DB: `~/.claude/interstat/sessions.db` (sessions, messages, messages_fts)
-- Search engine: `cass` (external, `~/.local/bin/cass`) — BM25 + semantic hybrid, sub-60ms
-- Date filtering: `--after` and `--before` accept `YYYY-MM-DD`, filter on actual session file dates
-- `session-search.sh search` delegates to `cass --robot`; `stats`/`activity`/`projects` use our SQLite
+For session search, timeline, context, and export: use `/intersearch:session-search`.
 
 ## Token Metrics Database
 

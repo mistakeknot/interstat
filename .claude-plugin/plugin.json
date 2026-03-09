@@ -8,7 +8,6 @@
   "skills": [
     "./skills/analyze",
     "./skills/report",
-    "./skills/status",
-    "./skills/session-search"
+    "./skills/status"
   ]
 }
