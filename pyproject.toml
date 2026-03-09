@@ -1,6 +1,6 @@
 [project]
 name = "interstat"
-version = "0.2.21"
+version = "0.2.22"
 requires-python = ">=3.10"
 
 [tool.uv]
