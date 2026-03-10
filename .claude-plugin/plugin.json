@@ -1,6 +1,6 @@
 {
   "name": "interstat",
-  "version": "0.2.25",
+  "version": "0.2.26",
   "description": "Token efficiency benchmarking and session analytics for agent workflows",
   "author": {
     "name": "MK"
