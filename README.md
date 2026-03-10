@@ -27,19 +27,19 @@ Then install the plugin:
 Generate a token efficiency report:
 
 ```
-/interstat:report
+/interstat:interstat-report
 ```
 
 Check current session metrics:
 
 ```
-/interstat:status
+/interstat:interstat-status
 ```
 
 Deep analysis of usage patterns:
 
 ```
-/interstat:analyze
+/interstat:interstat-analyze
 ```
 
 ## Architecture

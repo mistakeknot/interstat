@@ -1,5 +1,5 @@
 ---
-name: report
+name: interstat-report
 description: "Show token efficiency analysis and decision gate verdict"
 user_invocable: true
 ---
@@ -24,5 +24,5 @@ Arguments:
    ```
 2. Run `bash ${CLAUDE_PLUGIN_ROOT}/scripts/report.sh $DAYS`
 3. Present the output to the user
-4. If verdict is INSUFFICIENT DATA, suggest running `/interstat:analyze` first
+4. If verdict is INSUFFICIENT DATA, suggest running `/interstat:interstat-analyze` first
 5. If subagent type breakdown shows only hash IDs (no readable names like "Explore", "Plan", etc.), note that the plugin needs to be installed to capture agent types going forward

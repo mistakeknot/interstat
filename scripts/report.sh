@@ -21,7 +21,7 @@ echo ""
 
 if [[ "$SAMPLE_COUNT" -lt 10 ]]; then
   echo "Insufficient data: $SAMPLE_COUNT runs with token data (need at least 10)."
-  echo "Run /interstat:analyze to parse conversation JSONL files."
+  echo "Run /interstat:interstat-analyze to parse conversation JSONL files."
   exit 0
 fi
 

@@ -1,5 +1,5 @@
 ---
-name: status
+name: interstat-status
 description: "Show collection progress and pending parse status"
 user_invocable: true
 ---
@@ -16,4 +16,4 @@ Invoke when the user wants to check data collection progress.
 
 1. Run `bash ${CLAUDE_PLUGIN_ROOT}/scripts/status.sh`
 2. Present the output to the user
-3. If pending parse count is high, suggest running `/interstat:analyze`
+3. If pending parse count is high, suggest running `/interstat:interstat-analyze`

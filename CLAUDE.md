@@ -6,9 +6,9 @@ Token efficiency benchmarking for agent workflows. Measures actual token consump
 
 ```bash
 bash scripts/init-db.sh          # Initialize SQLite database
-/interstat:status                 # Check collection progress
-/interstat:analyze                # Parse JSONL for token data
-/interstat:report                 # Show decision gate analysis
+/interstat:interstat-status                 # Check collection progress
+/interstat:interstat-analyze                # Parse JSONL for token data
+/interstat:interstat-report                 # Show decision gate analysis
 ```
 
 ## Data Flow

@@ -1,5 +1,5 @@
 ---
-name: analyze
+name: interstat-analyze
 description: "Parse conversation JSONL files and backfill token counts into SQLite"
 user_invocable: true
 ---
@@ -23,4 +23,4 @@ Invoke when the user wants to:
    ```
 2. Present the output to the user showing how many sessions were parsed
 3. If errors occur, suggest running with `--force` for active sessions or checking `interstat:status` for details
-4. After parsing, suggest running `/interstat:report` to see updated analysis
+4. After parsing, suggest running `/interstat:interstat-report` to see updated analysis
