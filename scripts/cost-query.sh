@@ -58,7 +58,34 @@ _extra_where() {
     echo "$clauses"
 }
 
-# USD pricing per million tokens (API rates, Feb 2026)
+# --- Pricing from costs.yaml (canonical source: core/intercore/config/costs.yaml) ---
+# Resolve costs.yaml location, falling back to hardcoded defaults if not found.
+_COSTS_YAML=""
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for _p in \
+    "${COSTS_YAML:-}" \
+    "$_script_dir/../../../core/intercore/config/costs.yaml" \
+    "$_script_dir/../../intercore/config/costs.yaml" \
+; do
+    [[ -n "$_p" && -f "$_p" ]] && _COSTS_YAML="$_p" && break
+done
+
+# Parse costs.yaml into shell variables (haiku/sonnet/opus input/output per mtok).
+# Falls back to hardcoded values if costs.yaml not found or yq unavailable.
+HAIKU_INPUT=0.80; HAIKU_OUTPUT=4.00
+SONNET_INPUT=3.00; SONNET_OUTPUT=15.00
+OPUS_INPUT=15.00; OPUS_OUTPUT=75.00
+
+if [[ -n "$_COSTS_YAML" ]] && command -v yq >/dev/null 2>&1; then
+    HAIKU_INPUT=$(yq -r '.models.haiku.input_per_mtok // 0.80' "$_COSTS_YAML" 2>/dev/null) || HAIKU_INPUT=0.80
+    HAIKU_OUTPUT=$(yq -r '.models.haiku.output_per_mtok // 4.00' "$_COSTS_YAML" 2>/dev/null) || HAIKU_OUTPUT=4.00
+    SONNET_INPUT=$(yq -r '.models.sonnet.input_per_mtok // 3.00' "$_COSTS_YAML" 2>/dev/null) || SONNET_INPUT=3.00
+    SONNET_OUTPUT=$(yq -r '.models.sonnet.output_per_mtok // 15.00' "$_COSTS_YAML" 2>/dev/null) || SONNET_OUTPUT=15.00
+    OPUS_INPUT=$(yq -r '.models.opus.input_per_mtok // 15.00' "$_COSTS_YAML" 2>/dev/null) || OPUS_INPUT=15.00
+    OPUS_OUTPUT=$(yq -r '.models.opus.output_per_mtok // 75.00' "$_COSTS_YAML" 2>/dev/null) || OPUS_OUTPUT=75.00
+fi
+
+# USD pricing per million tokens — loaded from costs.yaml (Demarch-k2xf.6)
 # Used by cost-usd and baseline modes
 usd_cost_query() {
     local extra
@@ -72,18 +99,18 @@ usd_cost_query() {
                ROUND(
                    COALESCE(SUM(input_tokens),0) *
                    CASE
-                       WHEN model LIKE '%opus-4%' THEN 15.0 / 1000000
-                       WHEN model LIKE '%sonnet-4%' THEN 3.0 / 1000000
-                       WHEN model LIKE '%haiku-4%' THEN 1.0 / 1000000
-                       ELSE 3.0 / 1000000
+                       WHEN model LIKE '%opus-4%' THEN ${OPUS_INPUT} / 1000000
+                       WHEN model LIKE '%sonnet-4%' THEN ${SONNET_INPUT} / 1000000
+                       WHEN model LIKE '%haiku-4%' THEN ${HAIKU_INPUT} / 1000000
+                       ELSE ${SONNET_INPUT} / 1000000
                    END
                    +
                    COALESCE(SUM(output_tokens),0) *
                    CASE
-                       WHEN model LIKE '%opus-4%' THEN 75.0 / 1000000
-                       WHEN model LIKE '%sonnet-4%' THEN 15.0 / 1000000
-                       WHEN model LIKE '%haiku-4%' THEN 5.0 / 1000000
-                       ELSE 15.0 / 1000000
+                       WHEN model LIKE '%opus-4%' THEN ${OPUS_OUTPUT} / 1000000
+                       WHEN model LIKE '%sonnet-4%' THEN ${SONNET_OUTPUT} / 1000000
+                       WHEN model LIKE '%haiku-4%' THEN ${HAIKU_OUTPUT} / 1000000
+                       ELSE ${SONNET_OUTPUT} / 1000000
                    END
                , 4) as cost_usd
         FROM agent_runs
@@ -240,18 +267,18 @@ case "$mode" in
                 SUM(
                     COALESCE(input_tokens,0) *
                     CASE
-                        WHEN model LIKE '%opus-4%' THEN 15.0 / 1000000
-                        WHEN model LIKE '%sonnet-4%' THEN 3.0 / 1000000
-                        WHEN model LIKE '%haiku-4%' THEN 1.0 / 1000000
-                        ELSE 3.0 / 1000000
+                        WHEN model LIKE '%opus-4%' THEN ${OPUS_INPUT} / 1000000
+                        WHEN model LIKE '%sonnet-4%' THEN ${SONNET_INPUT} / 1000000
+                        WHEN model LIKE '%haiku-4%' THEN ${HAIKU_INPUT} / 1000000
+                        ELSE ${SONNET_INPUT} / 1000000
                     END
                     +
                     COALESCE(output_tokens,0) *
                     CASE
-                        WHEN model LIKE '%opus-4%' THEN 75.0 / 1000000
-                        WHEN model LIKE '%sonnet-4%' THEN 15.0 / 1000000
-                        WHEN model LIKE '%haiku-4%' THEN 5.0 / 1000000
-                        ELSE 15.0 / 1000000
+                        WHEN model LIKE '%opus-4%' THEN ${OPUS_OUTPUT} / 1000000
+                        WHEN model LIKE '%sonnet-4%' THEN ${SONNET_OUTPUT} / 1000000
+                        WHEN model LIKE '%haiku-4%' THEN ${HAIKU_OUTPUT} / 1000000
+                        ELSE ${SONNET_OUTPUT} / 1000000
                     END
                 )
             , 4)
