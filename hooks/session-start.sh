@@ -2,7 +2,8 @@
 # SessionStart hook — write bead context to temp file for post-task.sh
 # Runs once per session. Keyed on bead_id (not session_id) to avoid
 # stale data when sessions span multiple beads.
-set -euo pipefail
+set -uo pipefail
+trap 'exit 0' ERR
 
 INPUT=$(cat)
 session_id="$(printf '%s' "$INPUT" | jq -r '(.session_id // "")' 2>/dev/null || printf '')"

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # PostToolUse:* hook — capture ALL tool calls into tool_selection_events
 # Tracks tool usage patterns for failure classification (iv-rttr5)
-set -euo pipefail
+set -uo pipefail
+trap 'exit 0' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INIT_DB_SCRIPT="${SCRIPT_DIR}/../scripts/init-db.sh"

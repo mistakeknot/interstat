@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # PostToolUseFailure hook — capture tool invocation failures
 # First consumer of PostToolUseFailure in the ecosystem (iv-rttr5)
-set -euo pipefail
+set -uo pipefail
+trap 'exit 0' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INIT_DB_SCRIPT="${SCRIPT_DIR}/../scripts/init-db.sh"

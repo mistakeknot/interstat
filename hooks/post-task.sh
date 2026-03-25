@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # PostToolUse:Task hook — capture agent dispatch events into SQLite
-set -euo pipefail
+set -uo pipefail
+trap 'exit 0' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INIT_DB_SCRIPT="${SCRIPT_DIR}/../scripts/init-db.sh"
