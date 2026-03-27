@@ -85,7 +85,7 @@ if [[ -n "$_COSTS_YAML" ]] && command -v yq >/dev/null 2>&1; then
     OPUS_OUTPUT=$(yq -r '.models.opus.output_per_mtok // 75.00' "$_COSTS_YAML" 2>/dev/null) || OPUS_OUTPUT=75.00
 fi
 
-# USD pricing per million tokens — loaded from costs.yaml (Demarch-k2xf.6)
+# USD pricing per million tokens — loaded from costs.yaml (Sylveste-k2xf.6)
 # Used by cost-usd and baseline modes
 usd_cost_query() {
     local extra

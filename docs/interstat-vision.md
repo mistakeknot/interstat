@@ -7,11 +7,11 @@
 
 interstat is a token efficiency benchmarking plugin for Clavain agent workflows. It instruments agent subprocesses automatically via two Claude Code hooks: a PostToolUse:Task hook captures real-time events (agent name, session ID, wall-clock timing) on every Task tool invocation, and a SessionEnd hook triggers JSONL parsing to backfill actual token counts (input, output, cache hits) from Claude Code conversation files into a local SQLite database. Three skills surface that data: `/interstat:status` shows collection progress, `/interstat:analyze` runs the JSONL parse, and `/interstat:report` runs decision gate analysis against the collected baseline.
 
-interstat sits at the intersection of Clavain (the agent OS that spawns and manages subprocesses) and the broader Demarch cost infrastructure. Its cross-layer interface is `scripts/cost-query.sh`, a declared stable boundary that L1 Intercore and L2 Clavain query for aggregate token data without depending on interstat internals. interstat measures; other layers act on those measurements.
+interstat sits at the intersection of Clavain (the agent OS that spawns and manages subprocesses) and the broader Sylveste cost infrastructure. Its cross-layer interface is `scripts/cost-query.sh`, a declared stable boundary that L1 Intercore and L2 Clavain query for aggregate token data without depending on interstat internals. interstat measures; other layers act on those measurements.
 
 ## Why This Exists
 
-8 optimization beads (~25 person-days of work) were proposed — hierarchical dispatch, model routing, context compression — without any primary measurement of what agents actually consume. Every reviewer flagged the same gap: we were optimizing blind. interstat was built to close that gap before any of those investments were made. This is the literal implementation of "instrument first, optimize later" from Demarch's core philosophy: token counts are durable, replayable receipts of agent work. Without them, optimization proposals are narratives. With them, they become evidence.
+8 optimization beads (~25 person-days of work) were proposed — hierarchical dispatch, model routing, context compression — without any primary measurement of what agents actually consume. Every reviewer flagged the same gap: we were optimizing blind. interstat was built to close that gap before any of those investments were made. This is the literal implementation of "instrument first, optimize later" from Sylveste's core philosophy: token counts are durable, replayable receipts of agent work. Without them, optimization proposals are narratives. With them, they become evidence.
 
 ## Design Principles
 
