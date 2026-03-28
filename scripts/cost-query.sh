@@ -15,6 +15,8 @@
 #   cost-snapshot   Full cost snapshot for a bead (requires --bead=)
 #   baseline        North star: cost-per-landable-change
 #   shadow-savings  Hypothetical savings from local routing (cascade shadow log)
+#   shadow-by-model Per-model cost attribution breakdown
+#   shadow-roi      ROI summary: cloud cost avoided vs local cost
 #
 # Global options (apply to all modes):
 #   --since=<ISO>   Filter to runs after this timestamp (e.g. 2026-03-01T00:00:00Z)
@@ -351,18 +353,6 @@ case "$mode" in
         ;;
     shadow-savings)
         # Hypothetical savings from local routing vs cloud
-        # Build shadow WHERE clause (local_routing_shadow has same column names)
-        shadow_where=""
-        if [[ -n "$SINCE" ]]; then
-            if [[ "$SINCE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2} ]]; then
-                shadow_where="$shadow_where AND timestamp > '$SINCE'"
-            fi
-        fi
-        if [[ -n "$BEAD_FILTER" ]]; then
-            if [[ "$BEAD_FILTER" =~ ^[a-zA-Z0-9_.:-]+$ ]]; then
-                shadow_where="$shadow_where AND bead_id = '$BEAD_FILTER'"
-            fi
-        fi
         sqlite3 -json "$DB" "
             SELECT
                 COUNT(*) as total_decisions,
@@ -377,11 +367,49 @@ case "$mode" in
                 SUM(local_tokens) as total_local_tokens,
                 SUM(cloud_tokens_est) as total_cloud_tokens_est
             FROM local_routing_shadow
-            WHERE 1=1 ${shadow_where}"
+            WHERE 1=1 ${extra}"
+        ;;
+    shadow-by-model)
+        # Per-model cost attribution breakdown
+        sqlite3 -json "$DB" "
+            SELECT
+                local_model,
+                cloud_model,
+                COUNT(*) as decisions,
+                SUM(CASE WHEN cascade_decision = 'accept' THEN 1 ELSE 0 END) as accepts,
+                SUM(CASE WHEN cascade_decision = 'cloud' THEN 1 ELSE 0 END) as cloud_fallbacks,
+                ROUND(SUM(hypothetical_savings_usd), 4) as savings_usd,
+                ROUND(SUM(cloud_cost_usd), 4) as cloud_cost_usd,
+                SUM(local_tokens) as local_tokens,
+                SUM(cloud_tokens_est) as cloud_tokens_est,
+                ROUND(AVG(confidence), 4) as avg_confidence
+            FROM local_routing_shadow
+            WHERE 1=1 ${extra}
+            GROUP BY local_model, cloud_model
+            ORDER BY savings_usd DESC"
+        ;;
+    shadow-roi)
+        # ROI summary: cloud cost avoided / local cost
+        sqlite3 -json "$DB" "
+            SELECT
+                COUNT(*) as total_decisions,
+                SUM(CASE WHEN cascade_decision = 'accept' THEN 1 ELSE 0 END) as local_served,
+                SUM(CASE WHEN cascade_decision = 'cloud' THEN 1 ELSE 0 END) as cloud_routed,
+                ROUND(COALESCE(SUM(cloud_cost_usd), 0), 4) as total_cloud_cost_usd,
+                ROUND(COALESCE(SUM(local_cost_usd), 0), 4) as total_local_cost_usd,
+                ROUND(COALESCE(SUM(hypothetical_savings_usd), 0), 4) as total_savings_usd,
+                CASE WHEN SUM(local_cost_usd) > 0
+                     THEN ROUND(SUM(cloud_cost_usd) / SUM(local_cost_usd), 2)
+                     ELSE -1
+                END as roi_multiplier,
+                ROUND(CAST(SUM(CASE WHEN cascade_decision = 'accept' THEN 1 ELSE 0 END) AS REAL)
+                      / NULLIF(COUNT(*), 0) * 100, 1) as local_serve_pct
+            FROM local_routing_shadow
+            WHERE 1=1 ${extra}"
         ;;
     *)
         echo "Unknown mode: $mode" >&2
-        echo "Usage: cost-query.sh {aggregate|by-bead|by-phase|by-phase-model|by-bead-phase|session-count|per-session|cost-usd|cost-snapshot|baseline|shadow-savings}" >&2
+        echo "Usage: cost-query.sh {aggregate|by-bead|by-phase|by-phase-model|by-bead-phase|session-count|per-session|cost-usd|cost-snapshot|baseline|shadow-savings|shadow-by-model|shadow-roi}" >&2
         exit 1
         ;;
 esac
