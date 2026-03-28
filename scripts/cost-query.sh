@@ -14,6 +14,7 @@
 #   cost-usd        USD cost by model (API pricing)
 #   cost-snapshot   Full cost snapshot for a bead (requires --bead=)
 #   baseline        North star: cost-per-landable-change
+#   shadow-savings  Hypothetical savings from local routing (cascade shadow log)
 #
 # Global options (apply to all modes):
 #   --since=<ISO>   Filter to runs after this timestamp (e.g. 2026-03-01T00:00:00Z)
@@ -348,9 +349,39 @@ case "$mode" in
                 }
             }'
         ;;
+    shadow-savings)
+        # Hypothetical savings from local routing vs cloud
+        # Build shadow WHERE clause (local_routing_shadow has same column names)
+        shadow_where=""
+        if [[ -n "$SINCE" ]]; then
+            if [[ "$SINCE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2} ]]; then
+                shadow_where="$shadow_where AND timestamp > '$SINCE'"
+            fi
+        fi
+        if [[ -n "$BEAD_FILTER" ]]; then
+            if [[ "$BEAD_FILTER" =~ ^[a-zA-Z0-9_.:-]+$ ]]; then
+                shadow_where="$shadow_where AND bead_id = '$BEAD_FILTER'"
+            fi
+        fi
+        sqlite3 -json "$DB" "
+            SELECT
+                COUNT(*) as total_decisions,
+                SUM(CASE WHEN cascade_decision = 'accept' THEN 1 ELSE 0 END) as accepts,
+                SUM(CASE WHEN cascade_decision = 'escalate' THEN 1 ELSE 0 END) as escalations,
+                SUM(CASE WHEN cascade_decision = 'cloud' THEN 1 ELSE 0 END) as cloud_fallbacks,
+                ROUND(SUM(hypothetical_savings_usd), 4) as total_savings_usd,
+                ROUND(SUM(local_cost_usd), 4) as total_local_cost_usd,
+                ROUND(SUM(cloud_cost_usd), 4) as total_cloud_cost_usd,
+                ROUND(AVG(confidence), 4) as avg_confidence,
+                ROUND(AVG(probe_time_s), 4) as avg_probe_time_s,
+                SUM(local_tokens) as total_local_tokens,
+                SUM(cloud_tokens_est) as total_cloud_tokens_est
+            FROM local_routing_shadow
+            WHERE 1=1 ${shadow_where}"
+        ;;
     *)
         echo "Unknown mode: $mode" >&2
-        echo "Usage: cost-query.sh {aggregate|by-bead|by-phase|by-phase-model|by-bead-phase|session-count|per-session|cost-usd|cost-snapshot|baseline}" >&2
+        echo "Usage: cost-query.sh {aggregate|by-bead|by-phase|by-phase-model|by-bead-phase|session-count|per-session|cost-usd|cost-snapshot|baseline|shadow-savings}" >&2
         exit 1
         ;;
 esac

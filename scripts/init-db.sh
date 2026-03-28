@@ -35,8 +35,6 @@ CREATE TABLE IF NOT EXISTS agent_runs (
 CREATE INDEX IF NOT EXISTS idx_agent_runs_session ON agent_runs(session_id);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_agent ON agent_runs(agent_name);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_timestamp ON agent_runs(timestamp);
-CREATE INDEX IF NOT EXISTS idx_agent_runs_bead ON agent_runs(bead_id);
-CREATE INDEX IF NOT EXISTS idx_agent_runs_phase ON agent_runs(phase);
 SQL
 
 # Schema v2 migration: add subagent_type and description columns to existing tables
@@ -108,6 +106,40 @@ CREATE INDEX IF NOT EXISTS idx_tse_session ON tool_selection_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_tse_category ON tool_selection_events(failure_category);
 CREATE INDEX IF NOT EXISTS idx_tse_tool ON tool_selection_events(tool_name);
 CREATE INDEX IF NOT EXISTS idx_tse_outcome ON tool_selection_events(outcome);
+SQL
+
+# Schema v5 migration: local_routing_shadow table for cascade cost logging
+# Stores counterfactual cost data from interfere's confidence cascade.
+# Not in agent_runs to avoid polluting sprint token deltas.
+sqlite3 "$DB" <<'SQL'
+CREATE TABLE IF NOT EXISTS local_routing_shadow (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    session_id TEXT NOT NULL DEFAULT '',
+    bead_id TEXT NOT NULL DEFAULT '',
+    -- What the cascade decided
+    cascade_decision TEXT NOT NULL,  -- accept, escalate, cloud
+    confidence REAL NOT NULL DEFAULT 0.0,
+    -- Local model info
+    local_model TEXT NOT NULL,
+    local_tokens INTEGER NOT NULL DEFAULT 0,
+    -- Cloud counterfactual
+    cloud_model TEXT NOT NULL DEFAULT '',
+    cloud_tokens_est INTEGER NOT NULL DEFAULT 0,
+    -- Cost delta
+    local_cost_usd REAL NOT NULL DEFAULT 0.0,
+    cloud_cost_usd REAL NOT NULL DEFAULT 0.0,
+    hypothetical_savings_usd REAL NOT NULL DEFAULT 0.0,
+    -- Cascade metadata
+    probe_time_s REAL NOT NULL DEFAULT 0.0,
+    models_tried TEXT NOT NULL DEFAULT '',  -- comma-separated
+    escalation_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_lrs_timestamp ON local_routing_shadow(timestamp);
+CREATE INDEX IF NOT EXISTS idx_lrs_session ON local_routing_shadow(session_id);
+CREATE INDEX IF NOT EXISTS idx_lrs_bead ON local_routing_shadow(bead_id);
+CREATE INDEX IF NOT EXISTS idx_lrs_decision ON local_routing_shadow(cascade_decision);
 SQL
 
 echo "interstat: database initialized at $DB"
