@@ -407,9 +407,103 @@ case "$mode" in
             FROM local_routing_shadow
             WHERE 1=1 ${extra}"
         ;;
+    baseline-general)
+        # Domain-general north star: Cost Per Verified Outcome (CPVO)
+        # Counts verified outcomes across all work types, not just software commits.
+        # Falls back to software-only (baseline mode) if other types have no data.
+
+        extra="$(_extra_where)"
+
+        # --- Total cost (same as baseline) ---
+        total_usd=$(sqlite3 "$DB" "
+            SELECT ROUND(
+                SUM(
+                    COALESCE(input_tokens,0) *
+                    CASE
+                        WHEN model LIKE '%opus-4%' THEN ${OPUS_INPUT} / 1000000
+                        WHEN model LIKE '%sonnet-4%' THEN ${SONNET_INPUT} / 1000000
+                        WHEN model LIKE '%haiku-4%' THEN ${HAIKU_INPUT} / 1000000
+                        ELSE ${SONNET_INPUT} / 1000000
+                    END
+                    +
+                    COALESCE(output_tokens,0) *
+                    CASE
+                        WHEN model LIKE '%opus-4%' THEN ${OPUS_OUTPUT} / 1000000
+                        WHEN model LIKE '%sonnet-4%' THEN ${SONNET_OUTPUT} / 1000000
+                        WHEN model LIKE '%haiku-4%' THEN ${HAIKU_OUTPUT} / 1000000
+                        ELSE ${SONNET_OUTPUT} / 1000000
+                    END
+                )
+            , 4)
+            FROM agent_runs
+            WHERE total_tokens > 0 AND model IS NOT NULL AND model != '' $extra")
+
+        # --- Count verified outcomes per type ---
+        # Software: closed beads (canonical), git-log fallback
+        sw_count=0
+        if command -v bd >/dev/null 2>&1; then
+            sw_count=$(bd list --status=closed 2>/dev/null | grep -c "^" 2>/dev/null) || sw_count=0
+        fi
+        sw_count=$(echo "$sw_count" | tr -d '[:space:]')
+        sw_count="${sw_count:-0}"
+        # Fallback: git commits
+        if [[ "$sw_count" -eq 0 ]]; then
+            first_ts=$(sqlite3 "$DB" "SELECT MIN(timestamp) FROM agent_runs WHERE total_tokens > 0 $extra" 2>/dev/null | tr -d '[:space:]')
+            last_ts=$(sqlite3 "$DB" "SELECT MAX(timestamp) FROM agent_runs WHERE total_tokens > 0 $extra" 2>/dev/null | tr -d '[:space:]')
+            if [[ -n "$first_ts" && "$first_ts" != "null" ]]; then
+                sw_count=$(git -C "$REPO_PATH" log --oneline --after="$first_ts" --before="$last_ts" 2>/dev/null | wc -l | tr -d '[:space:]')
+                sw_count="${sw_count:-0}"
+            fi
+        fi
+
+        # Review: count sessions with phase=shipping or phase=quality-gates (proxy for completed reviews)
+        review_count=$(sqlite3 "$DB" "
+            SELECT COUNT(DISTINCT session_id) FROM agent_runs
+            WHERE phase IN ('shipping','quality-gates') AND total_tokens > 0 $extra" 2>/dev/null | tr -d '[:space:]')
+        review_count="${review_count:-0}"
+
+        # Research: count sessions with phase=research (proxy for completed research)
+        research_count=$(sqlite3 "$DB" "
+            SELECT COUNT(DISTINCT session_id) FROM agent_runs
+            WHERE phase = 'research' AND total_tokens > 0 $extra" 2>/dev/null | tr -d '[:space:]')
+        research_count="${research_count:-0}"
+
+        # Brainstorm: count sessions with phase=brainstorm that also reached strategized
+        brainstorm_count=$(sqlite3 "$DB" "
+            SELECT COUNT(DISTINCT session_id) FROM agent_runs
+            WHERE phase = 'strategized' AND total_tokens > 0 $extra" 2>/dev/null | tr -d '[:space:]')
+        brainstorm_count="${brainstorm_count:-0}"
+
+        total_outcomes=$((sw_count + review_count + research_count + brainstorm_count))
+
+        if [[ "$total_outcomes" -gt 0 ]]; then
+            cpvo=$(awk "BEGIN{printf \"%.4f\", ${total_usd:-0} / $total_outcomes}")
+        else
+            cpvo="0.0000"
+        fi
+
+        jq -n \
+            --argjson total_cost_usd "${total_usd:-0}" \
+            --argjson total_outcomes "$total_outcomes" \
+            --arg cpvo "$cpvo" \
+            --argjson by_type "$(jq -n \
+                --argjson software "$sw_count" \
+                --argjson review "$review_count" \
+                --argjson research "$research_count" \
+                --argjson brainstorm "$brainstorm_count" \
+                '{software: $software, review: $review, research: $research, brainstorm: $brainstorm}')" \
+            '{
+                metric: "cpvo",
+                description: "Cost Per Verified Outcome (domain-general)",
+                total_cost_usd: $total_cost_usd,
+                total_verified_outcomes: $total_outcomes,
+                cpvo_usd: ($cpvo | tonumber),
+                by_type: $by_type
+            }'
+        ;;
     *)
         echo "Unknown mode: $mode" >&2
-        echo "Usage: cost-query.sh {aggregate|by-bead|by-phase|by-phase-model|by-bead-phase|session-count|per-session|cost-usd|cost-snapshot|baseline|shadow-savings|shadow-by-model|shadow-roi}" >&2
+        echo "Usage: cost-query.sh {aggregate|by-bead|by-phase|by-phase-model|by-bead-phase|session-count|per-session|cost-usd|cost-snapshot|baseline|baseline-general|shadow-savings|shadow-by-model|shadow-roi}" >&2
         exit 1
         ;;
 esac
