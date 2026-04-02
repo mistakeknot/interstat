@@ -34,8 +34,10 @@ bash scripts/cost-query.sh per-session      # Tokens per session with time range
 bash scripts/cost-query.sh cost-usd         # USD cost by model (API pricing)
 bash scripts/cost-query.sh cost-snapshot    # Full cost snapshot for a bead (requires --bead=)
 bash scripts/cost-query.sh baseline         # North star: cost-per-landable-change
+bash scripts/cost-query.sh session-cost     # USD cost for current session (auto-detects session_id)
+bash scripts/cost-query.sh effectiveness    # Agent cost ranking from actual data
 ```
-All modes output JSON. `baseline` mode correlates git commits with token data.
+All modes output JSON. `baseline` mode correlates git commits with token data. `session-cost` auto-reads `/tmp/interstat-session-id` or accepts `--session=`. `effectiveness` ranks flux-drive agents by avg cost (combine with interspect evidence for quality-weighted view).
 
 ## Bead Context Protocol
 

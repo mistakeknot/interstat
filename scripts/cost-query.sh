@@ -17,6 +17,8 @@
 #   shadow-savings  Hypothetical savings from local routing (cascade shadow log)
 #   shadow-by-model Per-model cost attribution breakdown
 #   shadow-roi      ROI summary: cloud cost avoided vs local cost
+#   session-cost    USD cost for a specific session (requires --session=)
+#   effectiveness   Agent cost-effectiveness ranking (tokens/run, value proxy)
 #
 # Global options (apply to all modes):
 #   --since=<ISO>   Filter to runs after this timestamp (e.g. 2026-03-01T00:00:00Z)
@@ -36,11 +38,13 @@ shift || true
 REPO_PATH="${INTERSTAT_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 SINCE=""
 BEAD_FILTER=""
+SESSION_FILTER=""
 for arg in "$@"; do
     case "$arg" in
         --repo=*) REPO_PATH="${arg#--repo=}" ;;
         --since=*) SINCE="${arg#--since=}" ;;
         --bead=*) BEAD_FILTER="${arg#--bead=}" ;;
+        --session=*) SESSION_FILTER="${arg#--session=}" ;;
     esac
 done
 
@@ -501,9 +505,113 @@ case "$mode" in
                 by_type: $by_type
             }'
         ;;
+    session-cost)
+        # USD cost for a specific session — real-time cost display during sprints
+        # Auto-detects session_id from /tmp/interstat-session-id if --session= not provided
+        sid="$SESSION_FILTER"
+        if [[ -z "$sid" ]] && [[ -f /tmp/interstat-session-id ]]; then
+            sid=$(cat /tmp/interstat-session-id 2>/dev/null || echo "")
+        fi
+        if [[ -z "$sid" ]]; then
+            echo '{"error":"--session= required or /tmp/interstat-session-id must exist"}' >&2
+            exit 1
+        fi
+        # Validate session ID format
+        if [[ ! "$sid" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            echo '{"error":"invalid session_id format"}' >&2
+            exit 1
+        fi
+        sqlite3 -json "$DB" "
+            SELECT
+                '$sid' as session_id,
+                COUNT(*) as agent_runs,
+                COALESCE(SUM(input_tokens),0) as input_tokens,
+                COALESCE(SUM(output_tokens),0) as output_tokens,
+                COALESCE(SUM(total_tokens),0) as total_tokens,
+                ROUND(
+                    COALESCE(SUM(
+                        COALESCE(input_tokens,0) *
+                        CASE
+                            WHEN model LIKE '%opus-4%' THEN ${OPUS_INPUT} / 1000000
+                            WHEN model LIKE '%sonnet-4%' THEN ${SONNET_INPUT} / 1000000
+                            WHEN model LIKE '%haiku-4%' THEN ${HAIKU_INPUT} / 1000000
+                            ELSE ${SONNET_INPUT} / 1000000
+                        END
+                        +
+                        COALESCE(output_tokens,0) *
+                        CASE
+                            WHEN model LIKE '%opus-4%' THEN ${OPUS_OUTPUT} / 1000000
+                            WHEN model LIKE '%sonnet-4%' THEN ${SONNET_OUTPUT} / 1000000
+                            WHEN model LIKE '%haiku-4%' THEN ${HAIKU_OUTPUT} / 1000000
+                            ELSE ${SONNET_OUTPUT} / 1000000
+                        END
+                    ), 0)
+                , 4) as cost_usd,
+                MIN(timestamp) as first_run,
+                MAX(timestamp) as last_run
+            FROM agent_runs
+            WHERE session_id = '$sid' AND total_tokens > 0"
+        ;;
+    effectiveness)
+        # Agent cost ranking from actual data — sorted by avg cost descending
+        # Quality signal (findings accepted/dropped) lives in interspect, not interstat
+        # Combine with `interspect evidence <agent>` for full cost-effectiveness picture
+        sqlite3 -json "$DB" "
+            SELECT
+                agent_name,
+                COUNT(*) as runs,
+                CAST(AVG(total_tokens) AS INTEGER) as avg_tokens,
+                CAST(AVG(input_tokens) AS INTEGER) as avg_input,
+                CAST(AVG(output_tokens) AS INTEGER) as avg_output,
+                MAX(total_tokens) as max_tokens,
+                ROUND(CAST(AVG(output_tokens) AS REAL) / NULLIF(AVG(total_tokens), 0), 4) as output_ratio,
+                ROUND(
+                    AVG(
+                        COALESCE(input_tokens,0) *
+                        CASE
+                            WHEN model LIKE '%opus-4%' THEN ${OPUS_INPUT} / 1000000
+                            WHEN model LIKE '%sonnet-4%' THEN ${SONNET_INPUT} / 1000000
+                            WHEN model LIKE '%haiku-4%' THEN ${HAIKU_INPUT} / 1000000
+                            ELSE ${SONNET_INPUT} / 1000000
+                        END
+                        +
+                        COALESCE(output_tokens,0) *
+                        CASE
+                            WHEN model LIKE '%opus-4%' THEN ${OPUS_OUTPUT} / 1000000
+                            WHEN model LIKE '%sonnet-4%' THEN ${SONNET_OUTPUT} / 1000000
+                            WHEN model LIKE '%haiku-4%' THEN ${HAIKU_OUTPUT} / 1000000
+                            ELSE ${SONNET_OUTPUT} / 1000000
+                        END
+                    )
+                , 4) as avg_cost_usd,
+                ROUND(
+                    SUM(
+                        COALESCE(input_tokens,0) *
+                        CASE
+                            WHEN model LIKE '%opus-4%' THEN ${OPUS_INPUT} / 1000000
+                            WHEN model LIKE '%sonnet-4%' THEN ${SONNET_INPUT} / 1000000
+                            WHEN model LIKE '%haiku-4%' THEN ${HAIKU_INPUT} / 1000000
+                            ELSE ${SONNET_INPUT} / 1000000
+                        END
+                        +
+                        COALESCE(output_tokens,0) *
+                        CASE
+                            WHEN model LIKE '%opus-4%' THEN ${OPUS_OUTPUT} / 1000000
+                            WHEN model LIKE '%sonnet-4%' THEN ${SONNET_OUTPUT} / 1000000
+                            WHEN model LIKE '%haiku-4%' THEN ${HAIKU_OUTPUT} / 1000000
+                            ELSE ${SONNET_OUTPUT} / 1000000
+                        END
+                    )
+                , 4) as total_cost_usd
+            FROM agent_runs
+            WHERE agent_name LIKE 'interflux:%' AND total_tokens > 0 ${extra}
+            GROUP BY agent_name
+            HAVING runs >= 2
+            ORDER BY avg_cost_usd DESC"
+        ;;
     *)
         echo "Unknown mode: $mode" >&2
-        echo "Usage: cost-query.sh {aggregate|by-bead|by-phase|by-phase-model|by-bead-phase|session-count|per-session|cost-usd|cost-snapshot|baseline|baseline-general|shadow-savings|shadow-by-model|shadow-roi}" >&2
+        echo "Usage: cost-query.sh {aggregate|by-bead|by-phase|by-phase-model|by-bead-phase|session-count|per-session|cost-usd|cost-snapshot|baseline|baseline-general|shadow-savings|shadow-by-model|shadow-roi|session-cost|effectiveness}" >&2
         exit 1
         ;;
 esac
