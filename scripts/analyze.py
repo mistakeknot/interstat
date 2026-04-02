@@ -57,6 +57,26 @@ def session_hint_for_path(path: Path, subagent: bool) -> str | None:
     return path.stem
 
 
+def resolve_agent_type_from_meta(jsonl_path: Path) -> str | None:
+    """Read the companion .meta.json file for a subagent JSONL to get the semantic agent type.
+
+    Claude Code writes agent-<id>.meta.json alongside each agent-<id>.jsonl with
+    {"agentType": "<subagent_type>", "description": "..."}.
+    """
+    meta_path = jsonl_path.with_suffix(".meta.json")
+    if not meta_path.exists():
+        return None
+    try:
+        with meta_path.open("r", encoding="utf-8") as f:
+            meta = json.loads(f.read())
+        agent_type = meta.get("agentType")
+        if isinstance(agent_type, str) and agent_type:
+            return agent_type
+    except (json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
 def agent_name_for_path(path: Path, subagent: bool) -> str:
     if not subagent:
         return "main-session"
@@ -494,16 +514,27 @@ def main(argv: list[str]) -> int:
         logging.info("No JSONL files discovered to parse.")
 
     session_runs: dict[str, list[dict[str, object]]] = defaultdict(list)
+    resolved_count = 0
 
     for candidate in candidates:
         path = candidate["path"]
         if not isinstance(path, Path):
             continue
 
+        raw_agent_name = str(candidate["agent_name"])
+
+        # For subagent files, resolve hash ID to semantic agent name via .meta.json
+        resolved_agent_name = raw_agent_name
+        if candidate.get("subagent"):
+            meta_type = resolve_agent_type_from_meta(path)
+            if meta_type:
+                resolved_agent_name = meta_type
+                resolved_count += 1
+
         parsed = parse_jsonl(
             path=path,
             session_hint=as_str(candidate.get("session_hint")),
-            agent_name=str(candidate["agent_name"]),
+            agent_name=resolved_agent_name,
         )
         if parsed is None:
             continue
@@ -514,7 +545,7 @@ def main(argv: list[str]) -> int:
         session_runs[str(parsed["session_id"])].append(parsed)
 
     parsed_count = sum(len(runs) for runs in session_runs.values())
-    logging.info("Parsed %d agent run(s) across %d session(s).", parsed_count, len(session_runs))
+    logging.info("Parsed %d agent run(s) across %d session(s). Resolved %d subagent names via meta.json.", parsed_count, len(session_runs), resolved_count)
 
     if args.dry_run:
         print_dry_run(session_runs, FAILED_INSERTS_PATH)
