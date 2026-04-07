@@ -5,13 +5,17 @@
 set -uo pipefail
 trap 'exit 0' ERR
 
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib-context.sh
+source "$HOOK_DIR/lib-context.sh"
+
 INPUT=$(cat)
 session_id="$(printf '%s' "$INPUT" | jq -r '(.session_id // "")' 2>/dev/null || printf '')"
 
 # Persist session_id so downstream skills (route, sprint) can call set-bead-context.sh
 # after claiming a bead mid-session — session_id is only available in hook JSON payloads
 if [[ -n "$session_id" ]]; then
-    echo "$session_id" > "/tmp/interstat-session-id" 2>/dev/null || true
+    _context_write_session_id "$session_id" "interstat"
 
     # Dual-write to kernel session ledger (iv-30zy3)
     if command -v ic &>/dev/null; then
