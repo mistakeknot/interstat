@@ -14,6 +14,13 @@ DEFAULT_DB_PATH = Path.home() / ".claude" / "interstat" / "metrics.db"
 # Pricing per token (not per million) — matches Anthropic published rates
 # Source: https://docs.anthropic.com/en/docs/about-claude/models
 PRICING = {
+    # Claude Opus 4.7 (current default; same headline pricing as 4.6)
+    "claude-opus-4-7": {
+        "input": 5.0e-6,
+        "output": 25.0e-6,
+        "cache_read": 0.5e-6,
+        "cache_create": 6.25e-6,
+    },
     # Claude Opus 4.6 / 4.5
     "claude-opus-4-6": {
         "input": 5.0e-6,
@@ -56,8 +63,8 @@ PRICING = {
     },
 }
 
-# Default fallback (assume Opus 4.6 if model unknown)
-DEFAULT_PRICING = PRICING["claude-opus-4-6"]
+# Default fallback (assume Opus 4.7 if model unknown)
+DEFAULT_PRICING = PRICING["claude-opus-4-7"]
 
 
 def get_pricing(model: str | None) -> dict[str, float]:
@@ -69,7 +76,7 @@ def get_pricing(model: str | None) -> dict[str, float]:
         if model.startswith(key) or key.startswith(model):
             return prices
     if "opus" in model:
-        return PRICING["claude-opus-4-6"]
+        return PRICING["claude-opus-4-7"]
     if "sonnet" in model:
         return PRICING["claude-sonnet-4-6"]
     if "haiku" in model:
