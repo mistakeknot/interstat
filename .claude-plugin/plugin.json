@@ -10,5 +10,8 @@
     "./skills/report",
     "./skills/status",
     "./skills/cost"
+  ],
+  "peerDependencies": [
+    "interflux"
   ]
 }
