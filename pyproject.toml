@@ -3,5 +3,5 @@ name = "interstat"
 version = "0.2.26"
 requires-python = ">=3.10"
 
-[tool.uv]
-dev-dependencies = []
+[dependency-groups]
+dev = []
