@@ -46,6 +46,12 @@ Hooks read bead_id from `/tmp/interstat-bead-{session_id}` (session-scoped). To 
 bash scripts/set-bead-context.sh <session_id> <bead_id> [phase]
 ```
 
+When `phase` is omitted, the script resolves the bead's `ic_run_id` from Beads
+and reads the current phase from Intercore before writing either context file.
+Phase transitions remain a Clavain responsibility: after a successful run
+advance, Clavain must refresh both its kernel session attribution and this
+Interstat snapshot. Interstat observes phase state; it does not advance it.
+
 ## Session Analytics
 
 Session search has moved to the `intersearch` plugin (via cass). interstat retains token metrics and bead-aware analytics only.
