@@ -1,6 +1,6 @@
 # interstat
 
-Token efficiency benchmarking for Claude Code.
+Token efficiency benchmarking for Claude Code, Codex, and Kimi Code.
 
 ## What this does
 
