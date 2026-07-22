@@ -4,3 +4,6 @@
 __pycache__/
 .venv/
 .clavain/
+
+# Local publish-approval marker (never committed)
+.publish-approved
