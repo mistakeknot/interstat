@@ -6,7 +6,8 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh",
-            "timeout": 5
+            "timeout": 5,
+            "args": []
           }
         ]
       }
@@ -18,7 +19,8 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/post-task.sh",
-            "timeout": 10
+            "timeout": 10,
+            "args": []
           }
         ]
       },
@@ -28,7 +30,8 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/post-tool-all.sh",
-            "timeout": 5
+            "timeout": 5,
+            "args": []
           }
         ]
       }
@@ -39,7 +42,8 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/post-tool-failure.sh",
-            "timeout": 5
+            "timeout": 5,
+            "args": []
           }
         ]
       }
@@ -50,7 +54,8 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-end.sh",
-            "timeout": 15
+            "timeout": 15,
+            "args": []
           }
         ]
       }
