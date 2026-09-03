@@ -205,6 +205,12 @@ def parse_jsonl(path: Path, session_hint: str | None, agent_name: str) -> dict[s
     # assistant message; every line repeats the same message.id and the same
     # usage. Count each message once or a text+tool_use turn is billed twice.
     seen_message_ids: set[str] = set()
+    # Attribute the file to the model that generated the most output tokens.
+    # The old "last model seen" label mispriced every session that changed
+    # model mid-life, and after <synthetic> was priced at $0 it zeroed whole
+    # sessions whose final message was synthetic. Full per-(file, model) rows
+    # are Sylveste-balk; this keeps the single label truthful.
+    output_by_model: dict[str, int] = {}
     for entry in assistant_entries:
         message = entry.get("message", {})
         if not isinstance(message, dict):
@@ -224,11 +230,17 @@ def parse_jsonl(path: Path, session_hint: str | None, agent_name: str) -> dict[s
 
         model_candidate = as_str(message.get("model"))
         if model_candidate:
-            model = model_candidate
+            output_by_model[model_candidate] = output_by_model.get(model_candidate, 0) + as_int(usage.get("output_tokens"))
 
         timestamp_candidate = as_str(entry.get("timestamp"))
         if timestamp_candidate:
             timestamp = timestamp_candidate
+
+    real_models = {m: n for m, n in output_by_model.items() if m != "<synthetic>"}
+    ranked = real_models or output_by_model
+    if ranked:
+        # max output wins; ties resolve to the later-seen model (dict order)
+        model = max(reversed(list(ranked.items())), key=lambda kv: kv[1])[0]
 
     if not timestamp:
         for entry in entries:

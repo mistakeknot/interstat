@@ -37,3 +37,27 @@ def test_parse_jsonl_counts_a_streamed_message_once(tmp_path):
     assert run is not None
     assert run["output_tokens"] == 14          # msg_1 once + msg_2 once, not 21
     assert run["cache_read_tokens"] == 200
+
+
+def test_parse_jsonl_attributes_file_to_dominant_model_not_last(tmp_path):
+    def m(mid, model, out):
+        return {"type": "assistant", "sessionId": "s2", "timestamp": "2026-09-03T00:00:00Z",
+                "message": {"role": "assistant", "id": mid, "model": model,
+                            "usage": {"input_tokens": 1, "output_tokens": out}}}
+    lines = [m("a", "claude-opus-5", 100), m("b", "claude-fable-5-1", 50), m("c", "<synthetic>", 0)]
+    p = tmp_path / "s2.jsonl"
+    p.write_text("\n".join(json.dumps(l) for l in lines) + "\n")
+    run = analyze.parse_jsonl(p, "s2", "main-session")
+    assert run is not None
+    assert run["model"] == "claude-opus-5"      # most output, not last seen
+
+
+def test_parse_jsonl_synthetic_only_stays_synthetic(tmp_path):
+    line = {"type": "assistant", "sessionId": "s3", "timestamp": "2026-09-03T00:00:00Z",
+            "message": {"role": "assistant", "id": "z", "model": "<synthetic>",
+                        "usage": {"input_tokens": 0, "output_tokens": 0}}}
+    p = tmp_path / "s3.jsonl"
+    p.write_text(json.dumps(line) + "\n")
+    run = analyze.parse_jsonl(p, "s3", "main-session")
+    assert run is not None
+    assert run["model"] == "<synthetic>"
