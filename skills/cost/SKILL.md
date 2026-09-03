@@ -22,7 +22,7 @@ Arguments:
 
 ## Behavior
 
-1. Ensure interstat data is fresh — if the user hasn't run `/interstat:analyze` recently, suggest it first.
+1. Refresh first — token backfill normally runs at SessionEnd, and sessions on this estate live for days, so the table is stale by default. Run `cd ${CLAUDE_PLUGIN_ROOT} && uv run scripts/analyze.py >/dev/null 2>&1` before the report (idempotent; ~30-60s over a month of transcripts). For the lane split straight from transcripts, `uv run scripts/profile.py --days $DAYS` — its "Main-thread share of generated tokens" line is the routing doctrine's offload gate.
 2. Parse the days argument (default 30):
    ```bash
    DAYS="${args:-30}"

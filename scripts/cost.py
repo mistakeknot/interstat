@@ -11,17 +11,41 @@ from pathlib import Path
 
 DEFAULT_DB_PATH = Path.home() / ".claude" / "interstat" / "metrics.db"
 
-# Pricing per token (not per million) — matches Anthropic published rates
-# Source: https://docs.anthropic.com/en/docs/about-claude/models
+# Pricing per token (not per million). First-party Anthropic API rates,
+# verified 2026-09-03 against the claude-api skill's model table.
+# ORDER MATTERS: get_pricing() prefix-matches, so "claude-fable-5-1" must
+# precede "claude-fable-5" (which is a prefix of it).
 PRICING = {
-    # Claude Opus 4.7 (current default; same headline pricing as 4.6)
+    "claude-fable-5-1": {
+        "input": 10.0e-6,
+        "output": 50.0e-6,
+        "cache_read": 0.25e-6,   # Fable 5.1 cache reads are 0.025x, not 0.1x
+        "cache_create": 12.5e-6,
+    },
+    "claude-fable-5": {
+        "input": 10.0e-6,
+        "output": 50.0e-6,
+        "cache_read": 1.0e-6,
+        "cache_create": 12.5e-6,
+    },
+    "claude-opus-5": {
+        "input": 5.0e-6,
+        "output": 25.0e-6,
+        "cache_read": 0.5e-6,
+        "cache_create": 6.25e-6,
+    },
+    "claude-opus-4-8": {
+        "input": 5.0e-6,
+        "output": 25.0e-6,
+        "cache_read": 0.5e-6,
+        "cache_create": 6.25e-6,
+    },
     "claude-opus-4-7": {
         "input": 5.0e-6,
         "output": 25.0e-6,
         "cache_read": 0.5e-6,
         "cache_create": 6.25e-6,
     },
-    # Claude Opus 4.6 / 4.5
     "claude-opus-4-6": {
         "input": 5.0e-6,
         "output": 25.0e-6,
@@ -34,14 +58,18 @@ PRICING = {
         "cache_read": 0.5e-6,
         "cache_create": 6.25e-6,
     },
-    # Claude Opus 4.1 (legacy, more expensive)
     "claude-opus-4-1-20250501": {
         "input": 15.0e-6,
         "output": 75.0e-6,
         "cache_read": 1.5e-6,
         "cache_create": 18.75e-6,
     },
-    # Claude Sonnet 4.6 / 4.5
+    "claude-sonnet-5": {
+        "input": 2.0e-6,
+        "output": 10.0e-6,
+        "cache_read": 0.2e-6,
+        "cache_create": 2.5e-6,
+    },
     "claude-sonnet-4-6": {
         "input": 3.0e-6,
         "output": 15.0e-6,
@@ -54,17 +82,25 @@ PRICING = {
         "cache_read": 0.3e-6,
         "cache_create": 3.75e-6,
     },
-    # Claude Haiku 4.5
-    "claude-haiku-4-5-20251001": {
+    "claude-haiku-4-5": {
         "input": 1.0e-6,
         "output": 5.0e-6,
         "cache_read": 0.1e-6,
         "cache_create": 1.25e-6,
     },
+    # Synthetic rows (Claude Code emits model "<synthetic>" for harness
+    # messages). They cost nothing; pricing them at Opus rates invented
+    # $242 of phantom spend in the 2026-08 report.
+    "<synthetic>": {
+        "input": 0.0,
+        "output": 0.0,
+        "cache_read": 0.0,
+        "cache_create": 0.0,
+    },
 }
 
-# Default fallback (assume Opus 4.7 if model unknown)
-DEFAULT_PRICING = PRICING["claude-opus-4-7"]
+# Default fallback for an unknown model string: Opus 5 rates.
+DEFAULT_PRICING = PRICING["claude-opus-5"]
 
 
 def get_pricing(model: str | None) -> dict[str, float]:
@@ -72,15 +108,21 @@ def get_pricing(model: str | None) -> dict[str, float]:
         return DEFAULT_PRICING
     if model in PRICING:
         return PRICING[model]
-    for key, prices in PRICING.items():
-        if model.startswith(key) or key.startswith(model):
-            return prices
+    # Longest-prefix wins so "claude-fable-5-1" beats "claude-fable-5".
+    best_key = ""
+    for key in PRICING:
+        if model.startswith(key) and len(key) > len(best_key):
+            best_key = key
+    if best_key:
+        return PRICING[best_key]
+    if "fable" in model:
+        return PRICING["claude-fable-5"]
     if "opus" in model:
-        return PRICING["claude-opus-4-7"]
+        return PRICING["claude-opus-5"]
     if "sonnet" in model:
-        return PRICING["claude-sonnet-4-6"]
+        return PRICING["claude-sonnet-5"]
     if "haiku" in model:
-        return PRICING["claude-haiku-4-5-20251001"]
+        return PRICING["claude-haiku-4-5"]
     return DEFAULT_PRICING
 
 
@@ -133,6 +175,22 @@ def run_report(db_path: Path, days: int, fmt: str, sub_cost: float | None) -> No
             {cutoff_clause}
         GROUP BY model
         ORDER BY total_tokens DESC
+    """).fetchall()
+
+    # Per-lane aggregation: the main thread vs everything spawned from it.
+    lane_rows = conn.execute(f"""
+        SELECT
+            CASE WHEN agent_name = 'main-session' THEN 'main' ELSE 'subagent' END as lane,
+            COALESCE(model, 'unknown') as model,
+            COUNT(*) as runs,
+            COALESCE(SUM(input_tokens), 0) as input_tokens,
+            COALESCE(SUM(output_tokens), 0) as output_tokens,
+            COALESCE(SUM(cache_read_tokens), 0) as cache_read_tokens,
+            COALESCE(SUM(cache_creation_tokens), 0) as cache_creation_tokens
+        FROM agent_runs
+        WHERE total_tokens IS NOT NULL
+            {cutoff_clause}
+        GROUP BY lane, model
     """).fetchall()
 
     # Daily breakdown
@@ -196,6 +254,21 @@ def run_report(db_path: Path, days: int, fmt: str, sub_cost: float | None) -> No
         daily_costs[day]["cache_read"] += r["cache_read_tokens"]
         daily_costs[day]["cache_create"] += r["cache_creation_tokens"]
 
+    lane_totals: dict[str, dict[str, float]] = {
+        "main": {"cost": 0.0, "output": 0, "runs": 0},
+        "subagent": {"cost": 0.0, "output": 0, "runs": 0},
+    }
+    for r in lane_rows:
+        lane = r["lane"]
+        lane_totals[lane]["cost"] += calc_cost(dict(r), get_pricing(r["model"]))
+        lane_totals[lane]["output"] += r["output_tokens"]
+        lane_totals[lane]["runs"] += r["runs"]
+    total_output = lane_totals["main"]["output"] + lane_totals["subagent"]["output"]
+    main_output_share = (
+        lane_totals["main"]["output"] / total_output if total_output > 0 else 0.0
+    )
+    main_cost_share = lane_totals["main"]["cost"] / grand_total if grand_total > 0 else 0.0
+
     active_days = len(daily_costs)
     avg_per_day = grand_total / active_days if active_days > 0 else 0
     projected_monthly = avg_per_day * 30
@@ -215,6 +288,9 @@ def run_report(db_path: Path, days: int, fmt: str, sub_cost: float | None) -> No
                     "subscription_cost": sub,
                     "leverage": round(leverage, 1),
                     "by_model": model_costs,
+                    "by_lane": lane_totals,
+                    "main_output_share": round(main_output_share, 3),
+                    "main_cost_share": round(main_cost_share, 3),
                     "by_day": sorted(
                         daily_costs.values(), key=lambda x: x["day"], reverse=True
                     ),
@@ -236,6 +312,19 @@ def run_report(db_path: Path, days: int, fmt: str, sub_cost: float | None) -> No
         print(f"  Subscription cost:    ${sub:,.0f}/month")
         print(f"  Leverage:             {leverage:,.0f}x")
         print(f"  Savings:              ${grand_total - sub:,.2f}")
+    print()
+
+    # By lane — the routing doctrine's gate reads this number
+    print("--- By Lane (main thread vs subagents) ---")
+    print(f"{'Lane':<12s} {'Runs':>8s} {'Output':>10s} {'Cost':>12s} {'% Cost':>8s}")
+    print("-" * 72)
+    for lane in ("main", "subagent"):
+        lt = lane_totals[lane]
+        pct = lt["cost"] / grand_total * 100 if grand_total > 0 else 0
+        print(
+            f"{lane:<12s} {int(lt['runs']):>8,d} {fmt_tokens(int(lt['output'])):>10s} ${lt['cost']:>11,.2f} {pct:>7.1f}%"
+        )
+    print(f"  Main-thread share of generated tokens: {main_output_share*100:.1f}%")
     print()
 
     # By model

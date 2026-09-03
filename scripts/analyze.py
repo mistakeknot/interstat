@@ -201,10 +201,19 @@ def parse_jsonl(path: Path, session_hint: str | None, agent_name: str) -> dict[s
     model: str | None = None
     timestamp: str | None = None
 
+    # Claude Code writes one JSONL line per content block of a streamed
+    # assistant message; every line repeats the same message.id and the same
+    # usage. Count each message once or a text+tool_use turn is billed twice.
+    seen_message_ids: set[str] = set()
     for entry in assistant_entries:
         message = entry.get("message", {})
         if not isinstance(message, dict):
             continue
+        message_id = as_str(message.get("id"))
+        if message_id:
+            if message_id in seen_message_ids:
+                continue
+            seen_message_ids.add(message_id)
         usage = message.get("usage", {})
         if not isinstance(usage, dict):
             continue
