@@ -36,8 +36,9 @@ bash scripts/cost-query.sh cost-snapshot    # Full cost snapshot for a bead (req
 bash scripts/cost-query.sh baseline         # North star: cost-per-landable-change
 bash scripts/cost-query.sh session-cost     # USD cost for current session (auto-detects session_id)
 bash scripts/cost-query.sh effectiveness    # Agent cost ranking from actual data
+python3 scripts/profile.py --days 7 --completed-tasks N  # Claude+Codex context/turn and cost/task
 ```
-All modes output JSON. `baseline` mode correlates git commits with token data. `session-cost` auto-reads `/tmp/interstat-session-id` or accepts `--session=`. `effectiveness` ranks flux-drive agents by avg cost (combine with interspect evidence for quality-weighted view).
+All `cost-query.sh` modes output JSON. `baseline` mode correlates git commits with token data. `session-cost` auto-reads `/tmp/interstat-session-id` or accepts `--session=`. `effectiveness` ranks flux-drive agents by avg cost (combine with interspect evidence for quality-weighted view). `profile.py` reads both Claude Code and Codex transcripts; its token-share fields are diagnostic only, while `main_integrator_context_per_turn` and `absolute_cost_per_completed_task` are the rollout observations.
 
 ## Bead Context Protocol
 
@@ -61,7 +62,8 @@ For session search, timeline, context, and export: use `/intersearch:session-sea
 ## Token Metrics Database
 
 - Location: `~/.claude/interstat/metrics.db`
-- Schema version: 2 (tracked via `PRAGMA user_version`)
+- Schema version: 6 (tracked via `PRAGMA user_version`)
 - WAL mode enabled for concurrent access
 - `busy_timeout=5000` to handle parallel hook writes
-- Columns: `bead_id TEXT`, `phase TEXT` (added in schema v2 for cost correlation)
+- Correlation columns: `bead_id TEXT`, `phase TEXT` (schema v3)
+- Exact pricing column: `api_equivalent_cost_usd REAL` (schema v6), computed per response before aggregation so conditional long-context pricing remains correct

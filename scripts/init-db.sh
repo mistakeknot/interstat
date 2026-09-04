@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     cache_creation_tokens INTEGER,
     total_tokens INTEGER,
     model TEXT,
+    api_equivalent_cost_usd REAL,
     parsed_at TEXT,
     bead_id TEXT DEFAULT '',
     phase TEXT DEFAULT ''
@@ -141,5 +142,11 @@ CREATE INDEX IF NOT EXISTS idx_lrs_session ON local_routing_shadow(session_id);
 CREATE INDEX IF NOT EXISTS idx_lrs_bead ON local_routing_shadow(bead_id);
 CREATE INDEX IF NOT EXISTS idx_lrs_decision ON local_routing_shadow(cascade_decision);
 SQL
+
+# Schema v6 migration: exact per-request API-equivalent cost. This preserves
+# conditional pricing (for example Astra's >272K rule) after transcript rows
+# are aggregated into one agent_run.
+sqlite3 "$DB" "ALTER TABLE agent_runs ADD COLUMN api_equivalent_cost_usd REAL;" 2>/dev/null || true
+sqlite3 "$DB" "PRAGMA user_version = 6;"
 
 echo "interstat: database initialized at $DB"

@@ -16,6 +16,15 @@ DEFAULT_DB_PATH = Path.home() / ".claude" / "interstat" / "metrics.db"
 # ORDER MATTERS: get_pricing() prefix-matches, so "claude-fable-5-1" must
 # precede "claude-fable-5" (which is a prefix of it).
 PRICING = {
+    "gpt-6-astra": {
+        "input": 10.0e-6,
+        "output": 50.0e-6,
+        "cache_read": 1.0e-6,
+        "cache_create": 12.5e-6,
+        "long_context_threshold": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
+    },
     "claude-fable-5-1": {
         "input": 10.0e-6,
         "output": 50.0e-6,
@@ -127,11 +136,23 @@ def get_pricing(model: str | None) -> dict[str, float]:
 
 
 def calc_cost(row: dict, pricing: dict[str, float]) -> float:
+    """Price one request, applying conditional long-context rates when known.
+
+    `context_tokens` must describe a single request. Aggregated legacy rows do
+    not set it, because applying a threshold to a whole session would overbill.
+    """
+    input_multiplier = 1.0
+    output_multiplier = 1.0
+    threshold = pricing.get("long_context_threshold")
+    context_tokens = row.get("context_tokens")
+    if threshold is not None and context_tokens is not None and context_tokens > threshold:
+        input_multiplier = pricing.get("long_context_input_multiplier", 1.0)
+        output_multiplier = pricing.get("long_context_output_multiplier", 1.0)
     return (
-        row.get("input_tokens", 0) * pricing["input"]
-        + row.get("output_tokens", 0) * pricing["output"]
-        + row.get("cache_read_tokens", 0) * pricing["cache_read"]
-        + row.get("cache_creation_tokens", 0) * pricing["cache_create"]
+        row.get("input_tokens", 0) * pricing["input"] * input_multiplier
+        + row.get("output_tokens", 0) * pricing["output"] * output_multiplier
+        + row.get("cache_read_tokens", 0) * pricing["cache_read"] * input_multiplier
+        + row.get("cache_creation_tokens", 0) * pricing["cache_create"] * input_multiplier
     )
 
 
@@ -145,7 +166,13 @@ def fmt_tokens(n: int) -> str:
     return str(n)
 
 
-def run_report(db_path: Path, days: int, fmt: str, sub_cost: float | None) -> None:
+def run_report(
+    db_path: Path,
+    days: int,
+    fmt: str,
+    sub_cost: float | None,
+    completed_tasks: int | None = None,
+) -> None:
     if not db_path.exists():
         print(
             "No interstat database found. Run /interstat:analyze first.",
@@ -155,6 +182,13 @@ def run_report(db_path: Path, days: int, fmt: str, sub_cost: float | None) -> No
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(agent_runs)")}
+    exact_cost_select = (
+        "CASE WHEN COUNT(api_equivalent_cost_usd) = COUNT(*) "
+        "THEN SUM(api_equivalent_cost_usd) ELSE NULL END as exact_cost"
+        if "api_equivalent_cost_usd" in columns
+        else "NULL as exact_cost"
+    )
 
     cutoff_clause = ""
     if days < 9999:
@@ -169,7 +203,8 @@ def run_report(db_path: Path, days: int, fmt: str, sub_cost: float | None) -> No
             COALESCE(SUM(output_tokens), 0) as output_tokens,
             COALESCE(SUM(cache_read_tokens), 0) as cache_read_tokens,
             COALESCE(SUM(cache_creation_tokens), 0) as cache_creation_tokens,
-            COALESCE(SUM(total_tokens), 0) as total_tokens
+            COALESCE(SUM(total_tokens), 0) as total_tokens,
+            {exact_cost_select}
         FROM agent_runs
         WHERE total_tokens IS NOT NULL
             {cutoff_clause}
@@ -180,13 +215,14 @@ def run_report(db_path: Path, days: int, fmt: str, sub_cost: float | None) -> No
     # Per-lane aggregation: the main thread vs everything spawned from it.
     lane_rows = conn.execute(f"""
         SELECT
-            CASE WHEN agent_name = 'main-session' THEN 'main' ELSE 'subagent' END as lane,
+            CASE WHEN agent_name = 'main-session' THEN 'main-integrator' ELSE 'subagent' END as lane,
             COALESCE(model, 'unknown') as model,
             COUNT(*) as runs,
             COALESCE(SUM(input_tokens), 0) as input_tokens,
             COALESCE(SUM(output_tokens), 0) as output_tokens,
             COALESCE(SUM(cache_read_tokens), 0) as cache_read_tokens,
-            COALESCE(SUM(cache_creation_tokens), 0) as cache_creation_tokens
+            COALESCE(SUM(cache_creation_tokens), 0) as cache_creation_tokens,
+            {exact_cost_select}
         FROM agent_runs
         WHERE total_tokens IS NOT NULL
             {cutoff_clause}
@@ -202,7 +238,8 @@ def run_report(db_path: Path, days: int, fmt: str, sub_cost: float | None) -> No
             COALESCE(SUM(output_tokens), 0) as output_tokens,
             COALESCE(SUM(cache_read_tokens), 0) as cache_read_tokens,
             COALESCE(SUM(cache_creation_tokens), 0) as cache_creation_tokens,
-            COUNT(*) as runs
+            COUNT(*) as runs,
+            {exact_cost_select}
         FROM agent_runs
         WHERE total_tokens IS NOT NULL
             {cutoff_clause}
@@ -217,7 +254,7 @@ def run_report(db_path: Path, days: int, fmt: str, sub_cost: float | None) -> No
     for r in rows:
         pricing = get_pricing(r["model"])
         rd = dict(r)
-        cost = calc_cost(rd, pricing)
+        cost = r["exact_cost"] if r["exact_cost"] is not None else calc_cost(rd, pricing)
         grand_total += cost
         model_costs.append(
             {
@@ -236,7 +273,7 @@ def run_report(db_path: Path, days: int, fmt: str, sub_cost: float | None) -> No
         day = r["day"]
         pricing = get_pricing(r["model"])
         rd = dict(r)
-        cost = calc_cost(rd, pricing)
+        cost = r["exact_cost"] if r["exact_cost"] is not None else calc_cost(rd, pricing)
         if day not in daily_costs:
             daily_costs[day] = {
                 "day": day,
@@ -255,19 +292,23 @@ def run_report(db_path: Path, days: int, fmt: str, sub_cost: float | None) -> No
         daily_costs[day]["cache_create"] += r["cache_creation_tokens"]
 
     lane_totals: dict[str, dict[str, float]] = {
-        "main": {"cost": 0.0, "output": 0, "runs": 0},
+        "main-integrator": {"cost": 0.0, "output": 0, "runs": 0},
         "subagent": {"cost": 0.0, "output": 0, "runs": 0},
     }
     for r in lane_rows:
         lane = r["lane"]
-        lane_totals[lane]["cost"] += calc_cost(dict(r), get_pricing(r["model"]))
+        lane_totals[lane]["cost"] += (
+            r["exact_cost"]
+            if r["exact_cost"] is not None
+            else calc_cost(dict(r), get_pricing(r["model"]))
+        )
         lane_totals[lane]["output"] += r["output_tokens"]
         lane_totals[lane]["runs"] += r["runs"]
-    total_output = lane_totals["main"]["output"] + lane_totals["subagent"]["output"]
+    total_output = lane_totals["main-integrator"]["output"] + lane_totals["subagent"]["output"]
     main_output_share = (
-        lane_totals["main"]["output"] / total_output if total_output > 0 else 0.0
+        lane_totals["main-integrator"]["output"] / total_output if total_output > 0 else 0.0
     )
-    main_cost_share = lane_totals["main"]["cost"] / grand_total if grand_total > 0 else 0.0
+    main_cost_share = lane_totals["main-integrator"]["cost"] / grand_total if grand_total > 0 else 0.0
 
     active_days = len(daily_costs)
     avg_per_day = grand_total / active_days if active_days > 0 else 0
@@ -275,6 +316,9 @@ def run_report(db_path: Path, days: int, fmt: str, sub_cost: float | None) -> No
 
     sub = sub_cost if sub_cost else 0
     leverage = grand_total / sub if sub > 0 else 0
+    cost_per_completed_task = (
+        grand_total / completed_tasks if completed_tasks is not None else None
+    )
 
     if fmt == "json":
         print(
@@ -287,6 +331,12 @@ def run_report(db_path: Path, days: int, fmt: str, sub_cost: float | None) -> No
                     "projected_monthly": round(projected_monthly, 2),
                     "subscription_cost": sub,
                     "leverage": round(leverage, 1),
+                    "completed_tasks": completed_tasks,
+                    "absolute_cost_per_completed_task": (
+                        round(cost_per_completed_task, 2)
+                        if cost_per_completed_task is not None
+                        else None
+                    ),
                     "by_model": model_costs,
                     "by_lane": lane_totals,
                     "main_output_share": round(main_output_share, 3),
@@ -308,17 +358,20 @@ def run_report(db_path: Path, days: int, fmt: str, sub_cost: float | None) -> No
     print(f"  API-equivalent cost:  ${grand_total:,.2f}")
     print(f"  Avg per day:          ${avg_per_day:,.2f}")
     print(f"  Projected monthly:    ${projected_monthly:,.2f}")
+    if cost_per_completed_task is not None:
+        print(f"  Completed tasks:      {completed_tasks:,}")
+        print(f"  Cost/completed task:  ${cost_per_completed_task:,.2f}")
     if sub > 0:
         print(f"  Subscription cost:    ${sub:,.0f}/month")
         print(f"  Leverage:             {leverage:,.0f}x")
         print(f"  Savings:              ${grand_total - sub:,.2f}")
     print()
 
-    # By lane — the routing doctrine's gate reads this number
+    # By lane — shares are diagnostic; quality/safety outcomes govern routing.
     print("--- By Lane (main thread vs subagents) ---")
     print(f"{'Lane':<12s} {'Runs':>8s} {'Output':>10s} {'Cost':>12s} {'% Cost':>8s}")
     print("-" * 72)
-    for lane in ("main", "subagent"):
+    for lane in ("main-integrator", "subagent"):
         lt = lane_totals[lane]
         pct = lt["cost"] / grand_total * 100 if grand_total > 0 else 0
         print(
@@ -369,9 +422,17 @@ def main() -> None:
         help="Monthly subscription cost for leverage calculation (e.g. 600 for 3x Max)",
     )
     parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    parser.add_argument(
+        "--completed-tasks",
+        type=int,
+        default=None,
+        help="Verified tasks completed in the reporting window (for absolute cost/task)",
+    )
     args = parser.parse_args()
+    if args.completed_tasks is not None and args.completed_tasks <= 0:
+        parser.error("--completed-tasks must be greater than zero")
     days = args.days if args.days > 0 else 9999
-    run_report(args.db, days, args.fmt, args.subscription)
+    run_report(args.db, days, args.fmt, args.subscription, args.completed_tasks)
 
 
 if __name__ == "__main__":

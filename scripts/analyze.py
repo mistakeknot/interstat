@@ -12,6 +12,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+from cost import calc_cost, get_pricing
+
 RECENT_WINDOW_SECONDS = 5 * 60
 DEFAULT_DB_PATH = Path.home() / ".claude" / "interstat" / "metrics.db"
 DEFAULT_CONVERSATIONS_DIR = Path.home() / ".claude" / "projects"
@@ -198,6 +200,7 @@ def parse_jsonl(path: Path, session_hint: str | None, agent_name: str) -> dict[s
     output_tokens = 0
     cache_read_tokens = 0
     cache_creation_tokens = 0
+    api_equivalent_cost_usd = 0.0
     model: str | None = None
     timestamp: str | None = None
 
@@ -223,14 +226,28 @@ def parse_jsonl(path: Path, session_hint: str | None, agent_name: str) -> dict[s
         usage = message.get("usage", {})
         if not isinstance(usage, dict):
             continue
-        input_tokens += as_int(usage.get("input_tokens"))
-        output_tokens += as_int(usage.get("output_tokens"))
-        cache_read_tokens += as_int(usage.get("cache_read_input_tokens"))
-        cache_creation_tokens += as_int(usage.get("cache_creation_input_tokens"))
+        turn_input = as_int(usage.get("input_tokens"))
+        turn_output = as_int(usage.get("output_tokens"))
+        turn_cache_read = as_int(usage.get("cache_read_input_tokens"))
+        turn_cache_create = as_int(usage.get("cache_creation_input_tokens"))
+        input_tokens += turn_input
+        output_tokens += turn_output
+        cache_read_tokens += turn_cache_read
+        cache_creation_tokens += turn_cache_create
 
         model_candidate = as_str(message.get("model"))
         if model_candidate:
-            output_by_model[model_candidate] = output_by_model.get(model_candidate, 0) + as_int(usage.get("output_tokens"))
+            output_by_model[model_candidate] = output_by_model.get(model_candidate, 0) + turn_output
+            api_equivalent_cost_usd += calc_cost(
+                {
+                    "input_tokens": turn_input,
+                    "output_tokens": turn_output,
+                    "cache_read_tokens": turn_cache_read,
+                    "cache_creation_tokens": turn_cache_create,
+                    "context_tokens": turn_input + turn_cache_read + turn_cache_create,
+                },
+                get_pricing(model_candidate),
+            )
 
         timestamp_candidate = as_str(entry.get("timestamp"))
         if timestamp_candidate:
@@ -262,6 +279,7 @@ def parse_jsonl(path: Path, session_hint: str | None, agent_name: str) -> dict[s
         "cache_creation_tokens": cache_creation_tokens,
         "total_tokens": input_tokens + output_tokens,
         "model": model,
+        "api_equivalent_cost_usd": api_equivalent_cost_usd,
         "source_path": str(path),
     }
 
@@ -271,6 +289,11 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        conn.execute("ALTER TABLE agent_runs ADD COLUMN api_equivalent_cost_usd REAL")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
+            raise
     return conn
 
 
@@ -314,6 +337,7 @@ def upsert_agent_run(conn: sqlite3.Connection, run: dict[str, object], parsed_at
                 cache_creation_tokens = ?,
                 total_tokens = ?,
                 model = ?,
+                api_equivalent_cost_usd = ?,
                 parsed_at = ?
             WHERE id = ?
             """,
@@ -326,6 +350,7 @@ def upsert_agent_run(conn: sqlite3.Connection, run: dict[str, object], parsed_at
                 run["cache_creation_tokens"],
                 run["total_tokens"],
                 run["model"],
+                run["api_equivalent_cost_usd"],
                 parsed_at,
                 existing[0],
             ),
@@ -344,8 +369,9 @@ def upsert_agent_run(conn: sqlite3.Connection, run: dict[str, object], parsed_at
             cache_creation_tokens,
             total_tokens,
             model,
+            api_equivalent_cost_usd,
             parsed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             run["timestamp"],
@@ -357,6 +383,7 @@ def upsert_agent_run(conn: sqlite3.Connection, run: dict[str, object], parsed_at
             run["cache_creation_tokens"],
             run["total_tokens"],
             run["model"],
+            run["api_equivalent_cost_usd"],
             parsed_at,
         ),
     )

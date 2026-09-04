@@ -28,7 +28,7 @@
 #   --repo=<path>   Git repo for commit counting (default: cwd or INTERSTAT_REPO)
 set -euo pipefail
 
-DB="$HOME/.claude/interstat/metrics.db"
+DB="${INTERSTAT_DB:-$HOME/.claude/interstat/metrics.db}"
 [[ -f "$DB" ]] || { echo "[]"; exit 0; }
 
 mode="${1:-aggregate}"
@@ -82,6 +82,7 @@ done
 HAIKU_INPUT=0.80; HAIKU_OUTPUT=4.00
 SONNET_INPUT=3.00; SONNET_OUTPUT=15.00
 OPUS_INPUT=15.00; OPUS_OUTPUT=75.00
+ASTRA_INPUT=10.00; ASTRA_OUTPUT=50.00
 
 if [[ -n "$_COSTS_YAML" ]] && command -v yq >/dev/null 2>&1; then
     HAIKU_INPUT=$(yq -r '.models.haiku.input_per_mtok // 0.80' "$_COSTS_YAML" 2>/dev/null) || HAIKU_INPUT=0.80
@@ -92,8 +93,17 @@ if [[ -n "$_COSTS_YAML" ]] && command -v yq >/dev/null 2>&1; then
     OPUS_OUTPUT=$(yq -r '.models.opus.output_per_mtok // 75.00' "$_COSTS_YAML" 2>/dev/null) || OPUS_OUTPUT=75.00
 fi
 
-# USD pricing per million tokens — loaded from costs.yaml (Sylveste-k2xf.6)
-# Used by cost-usd and baseline modes
+# New transcript ingests store exact per-request cost so conditional pricing
+# survives session aggregation. Older databases fall back to base model rates;
+# rerun analyze.py to backfill exact Astra >272K pricing.
+EXACT_COST_EXPR="NULL"
+if sqlite3 "$DB" "PRAGMA table_info(agent_runs);" | awk -F'|' '$2 == "api_equivalent_cost_usd" {found=1} END {exit !found}'; then
+    EXACT_COST_EXPR="CASE WHEN COUNT(api_equivalent_cost_usd) = COUNT(*) THEN SUM(api_equivalent_cost_usd) ELSE NULL END"
+fi
+
+# USD pricing per million tokens. Claude defaults come from costs.yaml;
+# Astra uses the official row above plus exact ingested cost for >272K turns.
+# Used by cost-usd and baseline modes.
 usd_cost_query() {
     local extra
     extra="$(_extra_where)"
@@ -103,9 +113,11 @@ usd_cost_query() {
                COALESCE(SUM(input_tokens),0) as input_tokens,
                COALESCE(SUM(output_tokens),0) as output_tokens,
                COALESCE(SUM(total_tokens),0) as total_tokens,
-               ROUND(
+               ROUND(COALESCE(
+                   ${EXACT_COST_EXPR},
                    COALESCE(SUM(input_tokens),0) *
                    CASE
+                       WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_INPUT} / 1000000
                        WHEN model LIKE '%opus-4%' THEN ${OPUS_INPUT} / 1000000
                        WHEN model LIKE '%sonnet-4%' THEN ${SONNET_INPUT} / 1000000
                        WHEN model LIKE '%haiku-4%' THEN ${HAIKU_INPUT} / 1000000
@@ -114,12 +126,13 @@ usd_cost_query() {
                    +
                    COALESCE(SUM(output_tokens),0) *
                    CASE
+                       WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_OUTPUT} / 1000000
                        WHEN model LIKE '%opus-4%' THEN ${OPUS_OUTPUT} / 1000000
                        WHEN model LIKE '%sonnet-4%' THEN ${SONNET_OUTPUT} / 1000000
                        WHEN model LIKE '%haiku-4%' THEN ${HAIKU_OUTPUT} / 1000000
                        ELSE ${SONNET_OUTPUT} / 1000000
                    END
-               , 4) as cost_usd
+               ), 4) as cost_usd
         FROM agent_runs
         WHERE total_tokens > 0 AND model IS NOT NULL AND model != ''
               ${extra}
@@ -269,28 +282,7 @@ case "$mode" in
         first_session=$(echo "$tokens_json" | jq -r '.[0].first_session // ""')
         last_session=$(echo "$tokens_json" | jq -r '.[0].last_session // ""')
 
-        total_usd=$(sqlite3 "$DB" "
-            SELECT ROUND(
-                SUM(
-                    COALESCE(input_tokens,0) *
-                    CASE
-                        WHEN model LIKE '%opus-4%' THEN ${OPUS_INPUT} / 1000000
-                        WHEN model LIKE '%sonnet-4%' THEN ${SONNET_INPUT} / 1000000
-                        WHEN model LIKE '%haiku-4%' THEN ${HAIKU_INPUT} / 1000000
-                        ELSE ${SONNET_INPUT} / 1000000
-                    END
-                    +
-                    COALESCE(output_tokens,0) *
-                    CASE
-                        WHEN model LIKE '%opus-4%' THEN ${OPUS_OUTPUT} / 1000000
-                        WHEN model LIKE '%sonnet-4%' THEN ${SONNET_OUTPUT} / 1000000
-                        WHEN model LIKE '%haiku-4%' THEN ${HAIKU_OUTPUT} / 1000000
-                        ELSE ${SONNET_OUTPUT} / 1000000
-                    END
-                )
-            , 4)
-            FROM agent_runs
-            WHERE total_tokens > 0 AND model IS NOT NULL AND model != '' $extra")
+        total_usd=$(usd_cost_query | jq '[.[].cost_usd] | add // 0')
 
         # --- Landed change count (from ic landed, with git-log fallback) ---
         source="ic_landed"
@@ -419,28 +411,7 @@ case "$mode" in
         extra="$(_extra_where)"
 
         # --- Total cost (same as baseline) ---
-        total_usd=$(sqlite3 "$DB" "
-            SELECT ROUND(
-                SUM(
-                    COALESCE(input_tokens,0) *
-                    CASE
-                        WHEN model LIKE '%opus-4%' THEN ${OPUS_INPUT} / 1000000
-                        WHEN model LIKE '%sonnet-4%' THEN ${SONNET_INPUT} / 1000000
-                        WHEN model LIKE '%haiku-4%' THEN ${HAIKU_INPUT} / 1000000
-                        ELSE ${SONNET_INPUT} / 1000000
-                    END
-                    +
-                    COALESCE(output_tokens,0) *
-                    CASE
-                        WHEN model LIKE '%opus-4%' THEN ${OPUS_OUTPUT} / 1000000
-                        WHEN model LIKE '%sonnet-4%' THEN ${SONNET_OUTPUT} / 1000000
-                        WHEN model LIKE '%haiku-4%' THEN ${HAIKU_OUTPUT} / 1000000
-                        ELSE ${SONNET_OUTPUT} / 1000000
-                    END
-                )
-            , 4)
-            FROM agent_runs
-            WHERE total_tokens > 0 AND model IS NOT NULL AND model != '' $extra")
+        total_usd=$(usd_cost_query | jq '[.[].cost_usd] | add // 0')
 
         # --- Count verified outcomes per type ---
         # Software: closed beads (canonical), git-log fallback
