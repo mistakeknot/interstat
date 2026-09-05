@@ -200,7 +200,7 @@ def parse_jsonl(path: Path, session_hint: str | None, agent_name: str) -> dict[s
     output_tokens = 0
     cache_read_tokens = 0
     cache_creation_tokens = 0
-    api_equivalent_cost_usd = 0.0
+    api_equivalent_cost_usd: float | None = 0.0
     model: str | None = None
     timestamp: str | None = None
 
@@ -238,7 +238,7 @@ def parse_jsonl(path: Path, session_hint: str | None, agent_name: str) -> dict[s
         model_candidate = as_str(message.get("model"))
         if model_candidate:
             output_by_model[model_candidate] = output_by_model.get(model_candidate, 0) + turn_output
-            api_equivalent_cost_usd += calc_cost(
+            turn_cost = calc_cost(
                 {
                     "input_tokens": turn_input,
                     "output_tokens": turn_output,
@@ -248,6 +248,10 @@ def parse_jsonl(path: Path, session_hint: str | None, agent_name: str) -> dict[s
                 },
                 get_pricing(model_candidate),
             )
+            if turn_cost is None:
+                api_equivalent_cost_usd = None
+            elif api_equivalent_cost_usd is not None:
+                api_equivalent_cost_usd += turn_cost
 
         timestamp_candidate = as_str(entry.get("timestamp"))
         if timestamp_candidate:

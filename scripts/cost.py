@@ -11,11 +11,21 @@ from pathlib import Path
 
 DEFAULT_DB_PATH = Path.home() / ".claude" / "interstat" / "metrics.db"
 
-# Pricing per token (not per million). First-party Anthropic API rates,
-# verified 2026-09-03 against the claude-api skill's model table.
+# Pricing per token (not per million). OpenAI rows without observed service-tier
+# metadata are explicitly reported as Standard-equivalent estimates.
 # ORDER MATTERS: get_pricing() prefix-matches, so "claude-fable-5-1" must
 # precede "claude-fable-5" (which is a prefix of it).
 PRICING = {
+    "gpt-5.6-sol": {
+        "input": 4.0e-6,
+        "output": 20.0e-6,
+        "cache_read": 0.40e-6,
+        "cache_create": 5.0e-6,
+        "long_context_threshold": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
+        "pricing_basis": "Standard-equivalent",
+    },
     "gpt-6-astra": {
         "input": 10.0e-6,
         "output": 50.0e-6,
@@ -24,6 +34,7 @@ PRICING = {
         "long_context_threshold": 272_000,
         "long_context_input_multiplier": 2.0,
         "long_context_output_multiplier": 1.5,
+        "pricing_basis": "Standard-equivalent",
     },
     "claude-fable-5-1": {
         "input": 10.0e-6,
@@ -108,13 +119,9 @@ PRICING = {
     },
 }
 
-# Default fallback for an unknown model string: Opus 5 rates.
-DEFAULT_PRICING = PRICING["claude-opus-5"]
-
-
-def get_pricing(model: str | None) -> dict[str, float]:
+def get_pricing(model: str | None) -> dict | None:
     if not model:
-        return DEFAULT_PRICING
+        return None
     if model in PRICING:
         return PRICING[model]
     # Longest-prefix wins so "claude-fable-5-1" beats "claude-fable-5".
@@ -124,6 +131,8 @@ def get_pricing(model: str | None) -> dict[str, float]:
             best_key = key
     if best_key:
         return PRICING[best_key]
+    if not model.startswith("claude-"):
+        return None
     if "fable" in model:
         return PRICING["claude-fable-5"]
     if "opus" in model:
@@ -132,15 +141,18 @@ def get_pricing(model: str | None) -> dict[str, float]:
         return PRICING["claude-sonnet-5"]
     if "haiku" in model:
         return PRICING["claude-haiku-4-5"]
-    return DEFAULT_PRICING
+    return None
 
 
-def calc_cost(row: dict, pricing: dict[str, float]) -> float:
+def calc_cost(row: dict, pricing: dict | None) -> float | None:
     """Price one request, applying conditional long-context rates when known.
 
     `context_tokens` must describe a single request. Aggregated legacy rows do
     not set it, because applying a threshold to a whole session would overbill.
     """
+    if pricing is None:
+        return None
+
     input_multiplier = 1.0
     output_multiplier = 1.0
     threshold = pricing.get("long_context_threshold")
@@ -154,6 +166,15 @@ def calc_cost(row: dict, pricing: dict[str, float]) -> float:
         + row.get("cache_read_tokens", 0) * pricing["cache_read"] * input_multiplier
         + row.get("cache_creation_tokens", 0) * pricing["cache_create"] * input_multiplier
     )
+
+
+def row_cost(row: sqlite3.Row | dict) -> float | None:
+    """Use exact ingested cost only when the model itself has known pricing."""
+    pricing = get_pricing(row["model"])
+    if pricing is None:
+        return None
+    exact_cost = row["exact_cost"]
+    return exact_cost if exact_cost is not None else calc_cost(dict(row), pricing)
 
 
 def fmt_tokens(n: int) -> str:
@@ -215,7 +236,11 @@ def run_report(
     # Per-lane aggregation: the main thread vs everything spawned from it.
     lane_rows = conn.execute(f"""
         SELECT
-            CASE WHEN agent_name = 'main-session' THEN 'main-integrator' ELSE 'subagent' END as lane,
+            CASE
+                WHEN agent_name = 'main-session' THEN 'main-integrator'
+                WHEN agent_name IN ('executor', 'unknown') THEN agent_name
+                ELSE 'subagent'
+            END as lane,
             COALESCE(model, 'unknown') as model,
             COUNT(*) as runs,
             COALESCE(SUM(input_tokens), 0) as input_tokens,
@@ -249,13 +274,16 @@ def run_report(
 
     conn.close()
 
-    grand_total = 0.0
+    known_cost_subtotal = 0.0
+    unpriced_models: set[str] = set()
     model_costs = []
     for r in rows:
         pricing = get_pricing(r["model"])
-        rd = dict(r)
-        cost = r["exact_cost"] if r["exact_cost"] is not None else calc_cost(rd, pricing)
-        grand_total += cost
+        cost = row_cost(r)
+        if cost is None:
+            unpriced_models.add(r["model"])
+        else:
+            known_cost_subtotal += cost
         model_costs.append(
             {
                 "model": r["model"],
@@ -265,59 +293,116 @@ def run_report(
                 "cache_read_tokens": r["cache_read_tokens"],
                 "cache_creation_tokens": r["cache_creation_tokens"],
                 "cost": cost,
+                "pricing_status": "priced" if cost is not None else "unpriced",
+                "pricing_basis": (
+                    pricing.get("pricing_basis", "API-equivalent")
+                    if pricing is not None
+                    else "unpriced"
+                ),
             }
         )
 
     daily_costs: dict[str, dict] = {}
     for r in daily_rows:
         day = r["day"]
-        pricing = get_pricing(r["model"])
-        rd = dict(r)
-        cost = r["exact_cost"] if r["exact_cost"] is not None else calc_cost(rd, pricing)
+        cost = row_cost(r)
         if day not in daily_costs:
             daily_costs[day] = {
                 "day": day,
-                "cost": 0.0,
+                "known_cost_subtotal": 0.0,
+                "cost_estimate_complete": True,
                 "runs": 0,
                 "input": 0,
                 "output": 0,
                 "cache_read": 0,
                 "cache_create": 0,
             }
-        daily_costs[day]["cost"] += cost
+        if cost is None:
+            daily_costs[day]["cost_estimate_complete"] = False
+        else:
+            daily_costs[day]["known_cost_subtotal"] += cost
         daily_costs[day]["runs"] += r["runs"]
         daily_costs[day]["input"] += r["input_tokens"]
         daily_costs[day]["output"] += r["output_tokens"]
         daily_costs[day]["cache_read"] += r["cache_read_tokens"]
         daily_costs[day]["cache_create"] += r["cache_creation_tokens"]
 
-    lane_totals: dict[str, dict[str, float]] = {
-        "main-integrator": {"cost": 0.0, "output": 0, "runs": 0},
-        "subagent": {"cost": 0.0, "output": 0, "runs": 0},
+    lane_totals: dict[str, dict] = {
+        "main-integrator": {
+            "cost": 0.0,
+            "known_cost_subtotal": 0.0,
+            "cost_estimate_complete": True,
+            "output": 0,
+            "runs": 0,
+        },
+        "subagent": {
+            "cost": 0.0,
+            "known_cost_subtotal": 0.0,
+            "cost_estimate_complete": True,
+            "output": 0,
+            "runs": 0,
+        },
     }
     for r in lane_rows:
         lane = r["lane"]
-        lane_totals[lane]["cost"] += (
-            r["exact_cost"]
-            if r["exact_cost"] is not None
-            else calc_cost(dict(r), get_pricing(r["model"]))
+        lt = lane_totals.setdefault(
+            lane,
+            {
+                "cost": 0.0,
+                "known_cost_subtotal": 0.0,
+                "cost_estimate_complete": True,
+                "output": 0,
+                "runs": 0,
+            },
         )
+        cost = row_cost(r)
+        if cost is None:
+            lt["cost_estimate_complete"] = False
+        else:
+            lt["known_cost_subtotal"] += cost
         lane_totals[lane]["output"] += r["output_tokens"]
         lane_totals[lane]["runs"] += r["runs"]
-    total_output = lane_totals["main-integrator"]["output"] + lane_totals["subagent"]["output"]
+    for lt in lane_totals.values():
+        lt["cost"] = (
+            lt["known_cost_subtotal"] if lt["cost_estimate_complete"] else None
+        )
+    total_output = sum(lt["output"] for lt in lane_totals.values())
     main_output_share = (
         lane_totals["main-integrator"]["output"] / total_output if total_output > 0 else 0.0
     )
-    main_cost_share = lane_totals["main-integrator"]["cost"] / grand_total if grand_total > 0 else 0.0
+    cost_estimate_complete = not unpriced_models
+    total_api_equivalent = known_cost_subtotal if cost_estimate_complete else None
+    main_cost_share = (
+        lane_totals["main-integrator"]["known_cost_subtotal"] / known_cost_subtotal
+        if cost_estimate_complete and known_cost_subtotal > 0
+        else None
+    )
+
+    for daily in daily_costs.values():
+        daily["cost"] = (
+            daily["known_cost_subtotal"]
+            if daily["cost_estimate_complete"]
+            else None
+        )
 
     active_days = len(daily_costs)
-    avg_per_day = grand_total / active_days if active_days > 0 else 0
-    projected_monthly = avg_per_day * 30
+    avg_per_day = (
+        total_api_equivalent / active_days
+        if total_api_equivalent is not None and active_days > 0
+        else None
+    )
+    projected_monthly = avg_per_day * 30 if avg_per_day is not None else None
 
     sub = sub_cost if sub_cost else 0
-    leverage = grand_total / sub if sub > 0 else 0
+    leverage = (
+        total_api_equivalent / sub
+        if total_api_equivalent is not None and sub > 0
+        else None
+    )
     cost_per_completed_task = (
-        grand_total / completed_tasks if completed_tasks is not None else None
+        total_api_equivalent / completed_tasks
+        if total_api_equivalent is not None and completed_tasks is not None
+        else None
     )
 
     if fmt == "json":
@@ -326,11 +411,22 @@ def run_report(
                 {
                     "period_days": days,
                     "active_days": active_days,
-                    "total_api_equivalent": round(grand_total, 2),
-                    "avg_per_day": round(avg_per_day, 2),
-                    "projected_monthly": round(projected_monthly, 2),
+                    "total_api_equivalent": (
+                        round(total_api_equivalent, 2)
+                        if total_api_equivalent is not None
+                        else None
+                    ),
+                    "known_cost_subtotal": round(known_cost_subtotal, 2),
+                    "cost_estimate_complete": cost_estimate_complete,
+                    "unpriced_models": sorted(unpriced_models),
+                    "avg_per_day": round(avg_per_day, 2) if avg_per_day is not None else None,
+                    "projected_monthly": (
+                        round(projected_monthly, 2)
+                        if projected_monthly is not None
+                        else None
+                    ),
                     "subscription_cost": sub,
-                    "leverage": round(leverage, 1),
+                    "leverage": round(leverage, 1) if leverage is not None else None,
                     "completed_tasks": completed_tasks,
                     "absolute_cost_per_completed_task": (
                         round(cost_per_completed_task, 2)
@@ -340,7 +436,9 @@ def run_report(
                     "by_model": model_costs,
                     "by_lane": lane_totals,
                     "main_output_share": round(main_output_share, 3),
-                    "main_cost_share": round(main_cost_share, 3),
+                    "main_cost_share": (
+                        round(main_cost_share, 3) if main_cost_share is not None else None
+                    ),
                     "by_day": sorted(
                         daily_costs.values(), key=lambda x: x["day"], reverse=True
                     ),
@@ -355,53 +453,66 @@ def run_report(
     print(f"=== Interstat Cost Report (last {days} days) ===")
     print()
     print(f"  Active days:          {active_days}")
-    print(f"  API-equivalent cost:  ${grand_total:,.2f}")
-    print(f"  Avg per day:          ${avg_per_day:,.2f}")
-    print(f"  Projected monthly:    ${projected_monthly:,.2f}")
+    if total_api_equivalent is None:
+        print("  API-equivalent cost:  unavailable (unpriced models present)")
+        print(f"  Known cost subtotal:  ${known_cost_subtotal:,.2f}")
+        print(f"  Unpriced models:      {', '.join(sorted(unpriced_models))}")
+    else:
+        print(f"  API-equivalent cost:  ${total_api_equivalent:,.2f}")
+        print(f"  Avg per day:          ${avg_per_day:,.2f}")
+        print(f"  Projected monthly:    ${projected_monthly:,.2f}")
     if cost_per_completed_task is not None:
         print(f"  Completed tasks:      {completed_tasks:,}")
         print(f"  Cost/completed task:  ${cost_per_completed_task:,.2f}")
-    if sub > 0:
+    if sub > 0 and leverage is not None:
         print(f"  Subscription cost:    ${sub:,.0f}/month")
         print(f"  Leverage:             {leverage:,.0f}x")
-        print(f"  Savings:              ${grand_total - sub:,.2f}")
+        print(f"  Savings:              ${total_api_equivalent - sub:,.2f}")
     print()
 
     # By lane — shares are diagnostic; quality/safety outcomes govern routing.
     print("--- By Lane (main thread vs subagents) ---")
     print(f"{'Lane':<12s} {'Runs':>8s} {'Output':>10s} {'Cost':>12s} {'% Cost':>8s}")
     print("-" * 72)
-    for lane in ("main-integrator", "subagent"):
-        lt = lane_totals[lane]
-        pct = lt["cost"] / grand_total * 100 if grand_total > 0 else 0
-        print(
-            f"{lane:<12s} {int(lt['runs']):>8,d} {fmt_tokens(int(lt['output'])):>10s} ${lt['cost']:>11,.2f} {pct:>7.1f}%"
+    for lane, lt in lane_totals.items():
+        pct = (
+            lt["known_cost_subtotal"] / known_cost_subtotal * 100
+            if cost_estimate_complete and known_cost_subtotal > 0
+            else None
         )
+        cost_text = f"${lt['cost']:>11,.2f}" if lt["cost"] is not None else "unpriced".rjust(12)
+        pct_text = f"{pct:>7.1f}%" if pct is not None else "     n/a"
+        print(f"{lane:<12s} {int(lt['runs']):>8,d} {fmt_tokens(int(lt['output'])):>10s} {cost_text} {pct_text}")
     print(f"  Main-thread share of generated tokens: {main_output_share*100:.1f}%")
     print()
 
     # By model
     print("--- By Model ---")
-    print(f"{'Model':<40s} {'Runs':>8s} {'Cost':>12s} {'% Total':>8s}")
-    print("-" * 72)
+    print(f"{'Model':<34s} {'Basis':<19s} {'Runs':>8s} {'Cost':>12s} {'% Total':>8s}")
+    print("-" * 88)
     for mc in model_costs:
-        pct = mc["cost"] / grand_total * 100 if grand_total > 0 else 0
-        print(
-            f"{mc['model']:<40s} {mc['runs']:>8,d} ${mc['cost']:>11,.2f} {pct:>7.1f}%"
+        pct = (
+            mc["cost"] / known_cost_subtotal * 100
+            if mc["cost"] is not None and cost_estimate_complete and known_cost_subtotal > 0
+            else None
         )
+        cost_text = f"${mc['cost']:>11,.2f}" if mc["cost"] is not None else "unpriced".rjust(12)
+        pct_text = f"{pct:>7.1f}%" if pct is not None else "     n/a"
+        print(f"{mc['model']:<34s} {mc['pricing_basis']:<19s} {mc['runs']:>8,d} {cost_text} {pct_text}")
     print()
 
     # Top 10 days
-    sorted_days = sorted(daily_costs.values(), key=lambda x: x["cost"], reverse=True)
+    sorted_days = sorted(
+        daily_costs.values(), key=lambda x: x["known_cost_subtotal"], reverse=True
+    )
     print("--- Top 10 Days ---")
     print(
         f"{'Date':<12s} {'Cost':>12s} {'Runs':>8s} {'Input':>10s} {'Output':>10s} {'Cache Read':>12s}"
     )
     print("-" * 72)
     for d in sorted_days[:10]:
-        print(
-            f"{d['day']:<12s} ${d['cost']:>11,.0f} {d['runs']:>8,d} {fmt_tokens(d['input']):>10s} {fmt_tokens(d['output']):>10s} {fmt_tokens(d['cache_read']):>12s}"
-        )
+        cost_text = f"${d['cost']:>11,.0f}" if d["cost"] is not None else "unpriced".rjust(12)
+        print(f"{d['day']:<12s} {cost_text} {d['runs']:>8,d} {fmt_tokens(d['input']):>10s} {fmt_tokens(d['output']):>10s} {fmt_tokens(d['cache_read']):>12s}")
 
 
 def main() -> None:

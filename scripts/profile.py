@@ -25,6 +25,9 @@ from cost import calc_cost, get_pricing  # noqa: E402
 
 PROJECTS_ROOT = os.path.expanduser("~/.claude/projects")
 CODEX_SESSIONS_ROOT = os.path.expanduser("~/.codex/sessions")
+# App Server is also used by detached executors; its transport is not a role.
+INTERACTIVE_CODEX_SOURCES = {"cli", "app", "vscode"}
+ATTRIBUTION_LANES = {"main-integrator", "executor", "unknown"}
 
 
 def parse_ts(value: str) -> dt.datetime | None:
@@ -39,6 +42,13 @@ def parse_ts(value: str) -> dt.datetime | None:
 
 def is_subagent_file(path: str) -> bool:
     return "/subagents/" in path or os.path.basename(path).startswith("agent-")
+
+
+def pricing_basis(model: str) -> str:
+    pricing = get_pricing(model)
+    if pricing is None:
+        return "unpriced"
+    return pricing.get("pricing_basis", "API-equivalent")
 
 
 def normalized_record(lane: str, model: str, usage: dict, *, codex: bool) -> dict:
@@ -66,7 +76,42 @@ def normalized_record(lane: str, model: str, usage: dict, *, codex: bool) -> dic
     }
 
 
-def iter_codex_usage(path: str | os.PathLike, lo: dt.datetime, hi: dt.datetime):
+def codex_lane(source: object, session_id: str | None, session_attribution: dict[str, str]) -> str:
+    if isinstance(source, dict) and source.get("subagent"):
+        return "subagent"
+    if session_id and session_id in session_attribution:
+        return session_attribution[session_id]
+    if isinstance(source, str) and source in INTERACTIVE_CODEX_SOURCES:
+        return "main-integrator"
+    if source == "exec":
+        return "executor"
+    return "unknown"
+
+
+def load_session_attribution(path: str | os.PathLike | None) -> dict[str, str]:
+    if path is None:
+        return {}
+    with open(path, "r", encoding="utf-8") as handle:
+        raw = json.load(handle)
+    if not isinstance(raw, dict):
+        raise ValueError("attribution input must be a JSON object keyed by session id")
+    result: dict[str, str] = {}
+    for session_id, value in raw.items():
+        lane = value.get("lane") or value.get("role") if isinstance(value, dict) else value
+        if not isinstance(session_id, str) or lane not in ATTRIBUTION_LANES:
+            raise ValueError(
+                "attribution values must be main-integrator, executor, or unknown"
+            )
+        result[session_id] = lane
+    return result
+
+
+def iter_codex_usage(
+    path: str | os.PathLike,
+    lo: dt.datetime,
+    hi: dt.datetime,
+    session_attribution: dict[str, str] | None = None,
+):
     try:
         with open(path, "r", errors="ignore") as handle:
             entries = [json.loads(line) for line in handle if line.strip()]
@@ -74,18 +119,20 @@ def iter_codex_usage(path: str | os.PathLike, lo: dt.datetime, hi: dt.datetime):
         return
 
     source = None
+    session_id = None
     model_by_turn: dict[str, str] = {}
     for entry in entries:
         payload = entry.get("payload") or {}
         if entry.get("type") == "session_meta":
             source = payload.get("source")
+            session_id = payload.get("id")
         elif entry.get("type") == "turn_context":
             turn_id = payload.get("turn_id")
             model = payload.get("model")
             if turn_id and model:
                 model_by_turn[turn_id] = model
 
-    lane = "subagent" if isinstance(source, dict) and source.get("subagent") else "main-integrator"
+    lane = codex_lane(source, session_id, session_attribution or {})
     seen_responses: set[str] = set()
     for entry in entries:
         if entry.get("type") != "token_usage_record":
@@ -106,7 +153,13 @@ def iter_codex_usage(path: str | os.PathLike, lo: dt.datetime, hi: dt.datetime):
         yield normalized_record(lane, model, usage, codex=True)
 
 
-def collect(days: int, session: str | None, since: dt.datetime | None, until: dt.datetime | None):
+def collect(
+    days: int,
+    session: str | None,
+    since: dt.datetime | None,
+    until: dt.datetime | None,
+    session_attribution: dict[str, str] | None = None,
+):
     now = dt.datetime.now(dt.timezone.utc)
     lo = since or (now - dt.timedelta(days=days))
     hi = until or now
@@ -159,9 +212,13 @@ def collect(days: int, session: str | None, since: dt.datetime | None, until: dt
                     "context_tokens",
                 ):
                     c[field] += record[field]
-                c["cost"] += calc_cost(record, get_pricing(model))
+                message_cost = calc_cost(record, get_pricing(model))
+                if message_cost is None:
+                    c["unpriced_msgs"] += 1
+                else:
+                    c["cost"] += message_cost
     for path in codex_files:
-        for record in iter_codex_usage(path, lo, hi):
+        for record in iter_codex_usage(path, lo, hi, session_attribution):
             c = agg[(record["lane"], record["model"])]
             c["msgs"] += 1
             for field in (
@@ -172,7 +229,11 @@ def collect(days: int, session: str | None, since: dt.datetime | None, until: dt
                 "context_tokens",
             ):
                 c[field] += record[field]
-            c["cost"] += calc_cost(record, get_pricing(record["model"]))
+            message_cost = calc_cost(record, get_pricing(record["model"]))
+            if message_cost is None:
+                c["unpriced_msgs"] += 1
+            else:
+                c["cost"] += message_cost
     return agg, len(claude_files) + len(codex_files)
 
 
@@ -181,14 +242,19 @@ def summarize(rows: list[dict], completed_tasks: int | None) -> dict:
     lane_cost = collections.Counter()
     main_context = 0
     main_turns = 0
+    cost_estimate_complete = True
     for row in rows:
         lane_out[row["lane"]] += row["output_tokens"]
-        lane_cost[row["lane"]] += row["cost"]
+        if row["cost"] is None:
+            cost_estimate_complete = False
+        else:
+            lane_cost[row["lane"]] += row["cost"]
         if row["lane"] == "main-integrator":
             main_context += row["context_tokens"]
             main_turns += row["msgs"]
-    total_out = lane_out["main-integrator"] + lane_out["subagent"]
-    total_cost = lane_cost["main-integrator"] + lane_cost["subagent"]
+    total_out = sum(lane_out.values())
+    known_cost_subtotal = sum(lane_cost.values())
+    total_cost = known_cost_subtotal if cost_estimate_complete else None
     return {
         "main_output_share": (
             round(lane_out["main-integrator"] / total_out, 3) if total_out else None
@@ -201,10 +267,14 @@ def summarize(rows: list[dict], completed_tasks: int | None) -> dict:
         ),
         "completed_tasks": completed_tasks,
         "absolute_cost_per_completed_task": (
-            round(total_cost / completed_tasks, 2) if completed_tasks else None
+            round(total_cost / completed_tasks, 2)
+            if completed_tasks and total_cost is not None
+            else None
         ),
         "total_output_tokens": total_out,
-        "total_cost": round(total_cost, 2),
+        "total_cost": round(total_cost, 2) if total_cost is not None else None,
+        "known_cost_subtotal": round(known_cost_subtotal, 2),
+        "cost_estimate_complete": cost_estimate_complete,
     }
 
 
@@ -220,38 +290,54 @@ def main() -> int:
         help="verified tasks completed in this window (for absolute cost/task)",
     )
     ap.add_argument("--json", action="store_true")
+    ap.add_argument(
+        "--attribution",
+        help="JSON mapping of Codex session ids to explicit lanes",
+    )
     args = ap.parse_args()
     if args.completed_tasks is not None and args.completed_tasks <= 0:
         ap.error("--completed-tasks must be greater than zero")
     since = parse_ts(args.since) if args.since else None
     until = parse_ts(args.until) if args.until else None
-    agg, nfiles = collect(args.days, args.session, since, until)
+    try:
+        session_attribution = load_session_attribution(args.attribution)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        ap.error(str(exc))
+    agg, nfiles = collect(
+        args.days, args.session, since, until, session_attribution
+    )
 
     rows = []
     for (lane, model), c in agg.items():
-        cost = c["cost"]
+        cost = None if c["unpriced_msgs"] else c["cost"]
         ctx = c["context_tokens"] / max(c["msgs"], 1)
         rows.append({"lane": lane, "model": model, "msgs": c["msgs"], "output_tokens": c["output_tokens"],
                      "cache_read_tokens": c["cache_read_tokens"], "cache_creation_tokens": c["cache_creation_tokens"],
                      "input_tokens": c["input_tokens"], "context_tokens": c["context_tokens"],
-                     "ctx_per_msg": round(ctx), "cost": round(cost, 2)})
-    rows.sort(key=lambda r: -r["cost"])
+                     "ctx_per_msg": round(ctx), "cost": round(cost, 2) if cost is not None else None,
+                     "pricing_status": "priced" if cost is not None else "unpriced",
+                     "pricing_basis": pricing_basis(model)})
+    rows.sort(key=lambda r: -(r["cost"] or 0))
     summary = summarize(rows, args.completed_tasks)
     summary["files_scanned"] = nfiles
     if args.json:
         print(json.dumps({"summary": summary, "rows": rows}, indent=2))
         return 0
     print(f"# Lane profile ({'session ' + args.session if args.session else 'last %d days' % args.days}; files scanned: {nfiles})\n")
-    print(f"{'lane':16} {'model':26} {'msgs':>7} {'output':>9} {'cache_rd':>10} {'cache_wr':>9} {'ctx/turn':>9} {'$equiv':>9}")
+    print(f"{'lane':16} {'model':26} {'basis':19} {'msgs':>7} {'output':>9} {'cache_rd':>10} {'cache_wr':>9} {'ctx/turn':>9} {'$equiv':>9}")
     for r in rows:
-        print(f"{r['lane']:16} {r['model']:26} {r['msgs']:7d} {r['output_tokens']/1e6:8.2f}M {r['cache_read_tokens']/1e6:9.1f}M "
-              f"{r['cache_creation_tokens']/1e6:8.1f}M {r['ctx_per_msg']/1e3:8.0f}K {r['cost']:9.0f}")
+        cost_text = f"{r['cost']:9.0f}" if r["cost"] is not None else " unpriced"
+        print(f"{r['lane']:16} {r['model']:26} {r['pricing_basis']:19} {r['msgs']:7d} {r['output_tokens']/1e6:8.2f}M {r['cache_read_tokens']/1e6:9.1f}M "
+              f"{r['cache_creation_tokens']/1e6:8.1f}M {r['ctx_per_msg']/1e3:8.0f}K {cost_text}")
     print()
     if summary["main_output_share"] is None:
         print("No assistant messages in window.")
         return 1
     print(f"Main-thread share of generated tokens: {summary['main_output_share']*100:.1f}%")
-    print(f"Main-thread share of API-equivalent cost: {summary['main_cost_share']*100:.1f}%")
+    if summary["main_cost_share"] is not None:
+        print(f"Main-thread share of API-equivalent cost: {summary['main_cost_share']*100:.1f}%")
+    else:
+        print("Main-thread share of API-equivalent cost: unavailable (unpriced models present)")
     if summary["main_integrator_context_per_turn"] is not None:
         print(f"Main-integrator context per model turn: {summary['main_integrator_context_per_turn']/1e3:.0f}K")
     else:
@@ -260,7 +346,10 @@ def main() -> int:
         print(f"Absolute cost per completed task: ${summary['absolute_cost_per_completed_task']:,.2f}")
     else:
         print("Absolute cost per completed task: unavailable (pass --completed-tasks)")
-    print(f"Total output {summary['total_output_tokens']/1e6:.1f}M tokens, ${summary['total_cost']:,.0f} API-equivalent")
+    if summary["total_cost"] is not None:
+        print(f"Total output {summary['total_output_tokens']/1e6:.1f}M tokens, ${summary['total_cost']:,.0f} API-equivalent")
+    else:
+        print(f"Total output {summary['total_output_tokens']/1e6:.1f}M tokens; API-equivalent total unavailable, known subtotal ${summary['known_cost_subtotal']:,.0f}")
     return 0
 
 

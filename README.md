@@ -55,3 +55,22 @@ skills/
 ```
 
 Data lives in `~/.claude/interstat/metrics.db` (SQLite, WAL mode for concurrent hook writes).
+
+## Role and cost reporting
+
+`python3 scripts/profile.py --session <id> --completed-tasks <verified-count> --json`
+reports context per model turn and absolute API-equivalent cost per completed task.
+Supply only independently verified task completions; token share is diagnostic,
+not an offload or promotion gate.
+
+Headless Codex `exec` sessions are executors. Native subagents remain subagents;
+unattributed App Server and unknown sources are not assumed to be the main
+integrator. `--attribution <file.json>` accepts an explicit session-ID mapping
+to `main-integrator`, `executor`, or `unknown` when the transport alone cannot
+establish a role.
+
+Astra and Sol costs are explicitly Standard-equivalent estimates, not invoices
+or observed Fast/Flex charges. Per-request contexts above 272K use the full-request
+input/cache and output multipliers. Unknown model pricing is reported as
+unpriced, with an incomplete total and a separate known-cost subtotal; it is
+never silently charged at an Anthropic default rate.

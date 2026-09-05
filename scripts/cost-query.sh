@@ -62,6 +62,11 @@ _extra_where() {
             clauses="$clauses AND bead_id = '$BEAD_FILTER'"
         fi
     fi
+    if [[ -n "$SESSION_FILTER" ]]; then
+        if [[ "$SESSION_FILTER" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            clauses="$clauses AND session_id = '$SESSION_FILTER'"
+        fi
+    fi
     echo "$clauses"
 }
 
@@ -83,6 +88,13 @@ HAIKU_INPUT=0.80; HAIKU_OUTPUT=4.00
 SONNET_INPUT=3.00; SONNET_OUTPUT=15.00
 OPUS_INPUT=15.00; OPUS_OUTPUT=75.00
 ASTRA_INPUT=10.00; ASTRA_OUTPUT=50.00
+ASTRA_CACHE_READ=1.00; ASTRA_CACHE_WRITE=12.50
+SOL_INPUT=4.00; SOL_OUTPUT=20.00
+SOL_CACHE_READ=0.40; SOL_CACHE_WRITE=5.00
+FABLE_INPUT=10.00; FABLE_OUTPUT=50.00
+FABLE_CACHE_READ=1.00; FABLE_5_1_CACHE_READ=0.25; FABLE_CACHE_WRITE=12.50
+OPUS_5_INPUT=5.00; OPUS_5_OUTPUT=25.00
+SONNET_5_INPUT=2.00; SONNET_5_OUTPUT=10.00
 
 if [[ -n "$_COSTS_YAML" ]] && command -v yq >/dev/null 2>&1; then
     HAIKU_INPUT=$(yq -r '.models.haiku.input_per_mtok // 0.80' "$_COSTS_YAML" 2>/dev/null) || HAIKU_INPUT=0.80
@@ -97,12 +109,15 @@ fi
 # survives session aggregation. Older databases fall back to base model rates;
 # rerun analyze.py to backfill exact Astra >272K pricing.
 EXACT_COST_EXPR="NULL"
+EXACT_COST_ROW_EXPR="NULL"
 if sqlite3 "$DB" "PRAGMA table_info(agent_runs);" | awk -F'|' '$2 == "api_equivalent_cost_usd" {found=1} END {exit !found}'; then
     EXACT_COST_EXPR="CASE WHEN COUNT(api_equivalent_cost_usd) = COUNT(*) THEN SUM(api_equivalent_cost_usd) ELSE NULL END"
+    EXACT_COST_ROW_EXPR="api_equivalent_cost_usd"
 fi
 
 # USD pricing per million tokens. Claude defaults come from costs.yaml;
-# Astra uses the official row above plus exact ingested cost for >272K turns.
+# Astra and Sol use Standard-equivalent rows plus exact ingested cost for
+# >272K turns. Unknown models are returned as unpriced, never as Sonnet.
 # Used by cost-usd and baseline modes.
 usd_cost_query() {
     local extra
@@ -112,27 +127,86 @@ usd_cost_query() {
                COUNT(*) as runs,
                COALESCE(SUM(input_tokens),0) as input_tokens,
                COALESCE(SUM(output_tokens),0) as output_tokens,
+               COALESCE(SUM(cache_read_tokens),0) as cache_read_tokens,
+               COALESCE(SUM(cache_creation_tokens),0) as cache_creation_tokens,
                COALESCE(SUM(total_tokens),0) as total_tokens,
-               ROUND(COALESCE(
-                   ${EXACT_COST_EXPR},
-                   COALESCE(SUM(input_tokens),0) *
+               ROUND(
                    CASE
-                       WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_INPUT} / 1000000
-                       WHEN model LIKE '%opus-4%' THEN ${OPUS_INPUT} / 1000000
-                       WHEN model LIKE '%sonnet-4%' THEN ${SONNET_INPUT} / 1000000
-                       WHEN model LIKE '%haiku-4%' THEN ${HAIKU_INPUT} / 1000000
-                       ELSE ${SONNET_INPUT} / 1000000
-                   END
-                   +
-                   COALESCE(SUM(output_tokens),0) *
-                   CASE
-                       WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_OUTPUT} / 1000000
-                       WHEN model LIKE '%opus-4%' THEN ${OPUS_OUTPUT} / 1000000
-                       WHEN model LIKE '%sonnet-4%' THEN ${SONNET_OUTPUT} / 1000000
-                       WHEN model LIKE '%haiku-4%' THEN ${HAIKU_OUTPUT} / 1000000
-                       ELSE ${SONNET_OUTPUT} / 1000000
-                   END
-               ), 4) as cost_usd
+                       WHEN model LIKE 'gpt-5.6-sol%'
+                         OR model LIKE 'gpt-6-astra%'
+                         OR model LIKE 'claude-fable-5%'
+                         OR model LIKE 'claude-opus-5%'
+                         OR model LIKE 'claude-sonnet-5%'
+                         OR model LIKE '%opus-4%'
+                         OR model LIKE '%sonnet-4%'
+                         OR model LIKE '%haiku-4%'
+                       THEN COALESCE(
+                           ${EXACT_COST_EXPR},
+                           COALESCE(SUM(input_tokens),0) * CASE
+                               WHEN model LIKE 'gpt-5.6-sol%' THEN ${SOL_INPUT} / 1000000
+                               WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_INPUT} / 1000000
+                               WHEN model LIKE 'claude-fable-5%' THEN ${FABLE_INPUT} / 1000000
+                               WHEN model LIKE 'claude-opus-5%' THEN ${OPUS_5_INPUT} / 1000000
+                               WHEN model LIKE 'claude-sonnet-5%' THEN ${SONNET_5_INPUT} / 1000000
+                               WHEN model LIKE '%opus-4%' THEN ${OPUS_INPUT} / 1000000
+                               WHEN model LIKE '%sonnet-4%' THEN ${SONNET_INPUT} / 1000000
+                               WHEN model LIKE '%haiku-4%' THEN ${HAIKU_INPUT} / 1000000
+                           END
+                           + COALESCE(SUM(output_tokens),0) * CASE
+                               WHEN model LIKE 'gpt-5.6-sol%' THEN ${SOL_OUTPUT} / 1000000
+                               WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_OUTPUT} / 1000000
+                               WHEN model LIKE 'claude-fable-5%' THEN ${FABLE_OUTPUT} / 1000000
+                               WHEN model LIKE 'claude-opus-5%' THEN ${OPUS_5_OUTPUT} / 1000000
+                               WHEN model LIKE 'claude-sonnet-5%' THEN ${SONNET_5_OUTPUT} / 1000000
+                               WHEN model LIKE '%opus-4%' THEN ${OPUS_OUTPUT} / 1000000
+                               WHEN model LIKE '%sonnet-4%' THEN ${SONNET_OUTPUT} / 1000000
+                               WHEN model LIKE '%haiku-4%' THEN ${HAIKU_OUTPUT} / 1000000
+                           END
+                           + COALESCE(SUM(cache_read_tokens),0) * CASE
+                               WHEN model LIKE 'gpt-5.6-sol%' THEN ${SOL_CACHE_READ} / 1000000
+                               WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_CACHE_READ} / 1000000
+                               WHEN model LIKE 'claude-fable-5-1%' THEN ${FABLE_5_1_CACHE_READ} / 1000000
+                               WHEN model LIKE 'claude-fable-5%' THEN ${FABLE_CACHE_READ} / 1000000
+                               ELSE 0
+                           END
+                           + COALESCE(SUM(cache_creation_tokens),0) * CASE
+                               WHEN model LIKE 'gpt-5.6-sol%' THEN ${SOL_CACHE_WRITE} / 1000000
+                               WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_CACHE_WRITE} / 1000000
+                               WHEN model LIKE 'claude-fable-5%' THEN ${FABLE_CACHE_WRITE} / 1000000
+                               ELSE 0
+                           END
+                       )
+                       WHEN model = '<synthetic>' THEN 0
+                       ELSE NULL
+                   END,
+                   4
+               ) as cost_usd,
+               CASE
+                   WHEN model LIKE 'gpt-5.6-sol%' OR model LIKE 'gpt-6-astra%'
+                       THEN 'Standard-equivalent'
+                   WHEN model LIKE 'claude-fable-5%'
+                     OR model LIKE 'claude-opus-5%'
+                     OR model LIKE 'claude-sonnet-5%'
+                     OR model LIKE '%opus-4%'
+                     OR model LIKE '%sonnet-4%'
+                     OR model LIKE '%haiku-4%'
+                       THEN 'API-equivalent'
+                   WHEN model = '<synthetic>' THEN 'not-billed'
+                   ELSE 'unpriced'
+               END as pricing_basis,
+               CASE
+                   WHEN model LIKE 'gpt-5.6-sol%'
+                     OR model LIKE 'gpt-6-astra%'
+                     OR model LIKE 'claude-fable-5%'
+                     OR model LIKE 'claude-opus-5%'
+                     OR model LIKE 'claude-sonnet-5%'
+                     OR model LIKE '%opus-4%'
+                     OR model LIKE '%sonnet-4%'
+                     OR model LIKE '%haiku-4%'
+                     OR model = '<synthetic>'
+                       THEN 'priced'
+                   ELSE 'unpriced'
+               END as pricing_status
         FROM agent_runs
         WHERE total_tokens > 0 AND model IS NOT NULL AND model != ''
               ${extra}
@@ -140,12 +214,27 @@ usd_cost_query() {
         ORDER BY cost_usd DESC"
 }
 
+summarize_cost_rows() {
+    jq '{
+        known_cost_subtotal_usd: ([.[] | select(.cost_usd != null) | .cost_usd] | add // 0),
+        cost_estimate_complete: all(.[]; .pricing_status == "priced"),
+        unpriced_models: ([.[] | select(.pricing_status == "unpriced") | .model] | unique)
+    } | .total_cost_usd = (
+        if .cost_estimate_complete then .known_cost_subtotal_usd else null end
+    )'
+}
+
 extra="$(_extra_where)"
 
 case "$mode" in
     aggregate)
         sqlite3 -json "$DB" "
-            SELECT COALESCE(NULLIF(subagent_type,''),'main') as agent,
+            SELECT CASE
+                       WHEN agent_name = 'main-session' THEN 'main-integrator'
+                       WHEN agent_name IN ('executor', 'unknown') THEN agent_name
+                       WHEN COALESCE(subagent_type, '') != '' THEN subagent_type
+                       ELSE 'subagent'
+                   END as agent,
                    COUNT(*) as runs,
                    COALESCE(SUM(total_tokens),0) as tokens,
                    COALESCE(SUM(input_tokens),0) as input_tokens,
@@ -195,7 +284,12 @@ case "$mode" in
     by-bead-phase)
         sqlite3 -json "$DB" "
             SELECT bead_id, phase,
-                   COALESCE(NULLIF(subagent_type,''),'main') as agent,
+                   CASE
+                       WHEN agent_name = 'main-session' THEN 'main-integrator'
+                       WHEN agent_name IN ('executor', 'unknown') THEN agent_name
+                       WHEN COALESCE(subagent_type, '') != '' THEN subagent_type
+                       ELSE 'subagent'
+                   END as agent,
                    COUNT(*) as runs,
                    COALESCE(SUM(total_tokens),0) as tokens,
                    COALESCE(SUM(input_tokens),0) as input_tokens,
@@ -238,7 +332,11 @@ case "$mode" in
         fi
         by_model=$(usd_cost_query)
         [[ -z "$by_model" || "$by_model" == "[]" ]] && by_model="[]"
-        total_usd=$(echo "$by_model" | jq '[.[].cost_usd] | add // 0')
+        cost_summary=$(echo "$by_model" | summarize_cost_rows)
+        known_cost_subtotal=$(echo "$cost_summary" | jq '.known_cost_subtotal_usd')
+        cost_estimate_complete=$(echo "$cost_summary" | jq '.cost_estimate_complete')
+        total_usd=$(echo "$cost_summary" | jq '.total_cost_usd')
+        unpriced_models=$(echo "$cost_summary" | jq '.unpriced_models')
         phases_seen=$(sqlite3 -json "$DB" "
             SELECT DISTINCT phase FROM agent_runs
             WHERE phase != '' AND bead_id = '$BEAD_FILTER'
@@ -247,12 +345,18 @@ case "$mode" in
             --arg bead_id "$BEAD_FILTER" \
             --arg captured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --argjson total_cost_usd "$total_usd" \
+            --argjson known_cost_subtotal_usd "$known_cost_subtotal" \
+            --argjson cost_estimate_complete "$cost_estimate_complete" \
+            --argjson unpriced_models "$unpriced_models" \
             --argjson by_model "$by_model" \
             --argjson phases_seen "$phases_seen" \
             '{
                 bead_id: $bead_id,
                 captured_at: $captured_at,
                 total_cost_usd: $total_cost_usd,
+                known_cost_subtotal_usd: $known_cost_subtotal_usd,
+                cost_estimate_complete: $cost_estimate_complete,
+                unpriced_models: $unpriced_models,
                 by_model: $by_model,
                 phases_seen: $phases_seen
             }'
@@ -282,7 +386,13 @@ case "$mode" in
         first_session=$(echo "$tokens_json" | jq -r '.[0].first_session // ""')
         last_session=$(echo "$tokens_json" | jq -r '.[0].last_session // ""')
 
-        total_usd=$(usd_cost_query | jq '[.[].cost_usd] | add // 0')
+        by_model=$(usd_cost_query)
+        [[ -z "$by_model" || "$by_model" == "[]" ]] && by_model="[]"
+        cost_summary=$(echo "$by_model" | summarize_cost_rows)
+        total_usd=$(echo "$cost_summary" | jq '.total_cost_usd')
+        known_cost_subtotal=$(echo "$cost_summary" | jq '.known_cost_subtotal_usd')
+        cost_estimate_complete=$(echo "$cost_summary" | jq '.cost_estimate_complete')
+        unpriced_models=$(echo "$cost_summary" | jq '.unpriced_models')
 
         # --- Landed change count (from ic landed, with git-log fallback) ---
         source="ic_landed"
@@ -305,12 +415,16 @@ case "$mode" in
         fi
 
         # Calculate per-change metrics
-        if [[ "$total_commits" -gt 0 ]]; then
+        if [[ "$total_commits" -gt 0 && "$cost_estimate_complete" == "true" ]]; then
             tokens_per_change=$((total_tokens / total_commits))
             usd_per_change=$(awk "BEGIN{printf \"%.4f\", $total_usd / $total_commits}")
         else
-            tokens_per_change=0
-            usd_per_change="0.0000"
+            tokens_per_change=$((total_commits > 0 ? total_tokens / total_commits : 0))
+            if [[ "$cost_estimate_complete" == "true" ]]; then
+                usd_per_change="0.0000"
+            else
+                usd_per_change="null"
+            fi
         fi
 
         jq -n \
@@ -319,9 +433,12 @@ case "$mode" in
             --argjson total_input "$total_input" \
             --argjson total_output "$total_output" \
             --argjson total_usd "${total_usd:-0}" \
+            --argjson known_cost_subtotal_usd "$known_cost_subtotal" \
+            --argjson cost_estimate_complete "$cost_estimate_complete" \
+            --argjson unpriced_models "$unpriced_models" \
             --argjson landed_changes "$total_commits" \
             --argjson tokens_per_change "$tokens_per_change" \
-            --arg usd_per_change "$usd_per_change" \
+            --argjson usd_per_change "$usd_per_change" \
             --arg first_session "$first_session" \
             --arg last_session "$last_session" \
             --arg source "$source" \
@@ -337,13 +454,16 @@ case "$mode" in
                     output: $total_output
                 },
                 cost_usd: $total_usd,
+                known_cost_subtotal_usd: $known_cost_subtotal_usd,
+                cost_estimate_complete: $cost_estimate_complete,
+                unpriced_models: $unpriced_models,
                 landed_changes: {
                     count: $landed_changes,
                     source: $source
                 },
                 north_star: {
                     tokens_per_landable_change: $tokens_per_change,
-                    usd_per_landable_change: ($usd_per_change | tonumber)
+                    usd_per_landable_change: $usd_per_change
                 }
             }'
         ;;
@@ -411,7 +531,13 @@ case "$mode" in
         extra="$(_extra_where)"
 
         # --- Total cost (same as baseline) ---
-        total_usd=$(usd_cost_query | jq '[.[].cost_usd] | add // 0')
+        by_model=$(usd_cost_query)
+        [[ -z "$by_model" || "$by_model" == "[]" ]] && by_model="[]"
+        cost_summary=$(echo "$by_model" | summarize_cost_rows)
+        total_usd=$(echo "$cost_summary" | jq '.total_cost_usd')
+        known_cost_subtotal=$(echo "$cost_summary" | jq '.known_cost_subtotal_usd')
+        cost_estimate_complete=$(echo "$cost_summary" | jq '.cost_estimate_complete')
+        unpriced_models=$(echo "$cost_summary" | jq '.unpriced_models')
 
         # --- Count verified outcomes per type ---
         # Software: closed beads (canonical), git-log fallback
@@ -451,16 +577,21 @@ case "$mode" in
 
         total_outcomes=$((sw_count + review_count + research_count + brainstorm_count))
 
-        if [[ "$total_outcomes" -gt 0 ]]; then
+        if [[ "$total_outcomes" -gt 0 && "$cost_estimate_complete" == "true" ]]; then
             cpvo=$(awk "BEGIN{printf \"%.4f\", ${total_usd:-0} / $total_outcomes}")
+        elif [[ "$cost_estimate_complete" == "false" ]]; then
+            cpvo="null"
         else
             cpvo="0.0000"
         fi
 
         jq -n \
             --argjson total_cost_usd "${total_usd:-0}" \
+            --argjson known_cost_subtotal_usd "$known_cost_subtotal" \
+            --argjson cost_estimate_complete "$cost_estimate_complete" \
+            --argjson unpriced_models "$unpriced_models" \
             --argjson total_outcomes "$total_outcomes" \
-            --arg cpvo "$cpvo" \
+            --argjson cpvo "$cpvo" \
             --argjson by_type "$(jq -n \
                 --argjson software "$sw_count" \
                 --argjson review "$review_count" \
@@ -471,8 +602,11 @@ case "$mode" in
                 metric: "cpvo",
                 description: "Cost Per Verified Outcome (domain-general)",
                 total_cost_usd: $total_cost_usd,
+                known_cost_subtotal_usd: $known_cost_subtotal_usd,
+                cost_estimate_complete: $cost_estimate_complete,
+                unpriced_models: $unpriced_models,
                 total_verified_outcomes: $total_outcomes,
-                cpvo_usd: ($cpvo | tonumber),
+                cpvo_usd: $cpvo,
                 by_type: $by_type
             }'
         ;;
@@ -492,42 +626,91 @@ case "$mode" in
             echo '{"error":"invalid session_id format"}' >&2
             exit 1
         fi
-        sqlite3 -json "$DB" "
+        SESSION_FILTER="$sid"
+        tokens_json=$(sqlite3 -json "$DB" "
             SELECT
                 '$sid' as session_id,
                 COUNT(*) as agent_runs,
                 COALESCE(SUM(input_tokens),0) as input_tokens,
                 COALESCE(SUM(output_tokens),0) as output_tokens,
                 COALESCE(SUM(total_tokens),0) as total_tokens,
-                ROUND(
-                    COALESCE(SUM(
-                        COALESCE(input_tokens,0) *
-                        CASE
-                            WHEN model LIKE '%opus-4%' THEN ${OPUS_INPUT} / 1000000
-                            WHEN model LIKE '%sonnet-4%' THEN ${SONNET_INPUT} / 1000000
-                            WHEN model LIKE '%haiku-4%' THEN ${HAIKU_INPUT} / 1000000
-                            ELSE ${SONNET_INPUT} / 1000000
-                        END
-                        +
-                        COALESCE(output_tokens,0) *
-                        CASE
-                            WHEN model LIKE '%opus-4%' THEN ${OPUS_OUTPUT} / 1000000
-                            WHEN model LIKE '%sonnet-4%' THEN ${SONNET_OUTPUT} / 1000000
-                            WHEN model LIKE '%haiku-4%' THEN ${HAIKU_OUTPUT} / 1000000
-                            ELSE ${SONNET_OUTPUT} / 1000000
-                        END
-                    ), 0)
-                , 4) as cost_usd,
                 MIN(timestamp) as first_run,
                 MAX(timestamp) as last_run
             FROM agent_runs
-            WHERE session_id = '$sid' AND total_tokens > 0"
+            WHERE session_id = '$sid' AND total_tokens > 0")
+        by_model=$(usd_cost_query)
+        [[ -z "$by_model" || "$by_model" == "[]" ]] && by_model="[]"
+        cost_summary=$(echo "$by_model" | summarize_cost_rows)
+        jq -n \
+            --argjson tokens "$tokens_json" \
+            --argjson costs "$cost_summary" \
+            --argjson by_model "$by_model" \
+            '[($tokens[0] // {}) + {
+                cost_usd: $costs.total_cost_usd,
+                known_cost_subtotal_usd: $costs.known_cost_subtotal_usd,
+                cost_estimate_complete: $costs.cost_estimate_complete,
+                unpriced_models: $costs.unpriced_models,
+                by_model: $by_model
+            }]'
         ;;
     effectiveness)
         # Agent cost ranking from actual data — sorted by avg cost descending
         # Quality signal (findings accepted/dropped) lives in interspect, not interstat
         # Combine with `interspect evidence <agent>` for full cost-effectiveness picture
         sqlite3 -json "$DB" "
+            WITH priced_runs AS (
+                SELECT *,
+                    CASE
+                        WHEN model LIKE 'gpt-5.6-sol%'
+                          OR model LIKE 'gpt-6-astra%'
+                          OR model LIKE 'claude-fable-5%'
+                          OR model LIKE 'claude-opus-5%'
+                          OR model LIKE 'claude-sonnet-5%'
+                          OR model LIKE '%opus-4%'
+                          OR model LIKE '%sonnet-4%'
+                          OR model LIKE '%haiku-4%'
+                        THEN COALESCE(
+                            ${EXACT_COST_ROW_EXPR},
+                            COALESCE(input_tokens,0) * CASE
+                                WHEN model LIKE 'gpt-5.6-sol%' THEN ${SOL_INPUT} / 1000000
+                                WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_INPUT} / 1000000
+                                WHEN model LIKE 'claude-fable-5%' THEN ${FABLE_INPUT} / 1000000
+                                WHEN model LIKE 'claude-opus-5%' THEN ${OPUS_5_INPUT} / 1000000
+                                WHEN model LIKE 'claude-sonnet-5%' THEN ${SONNET_5_INPUT} / 1000000
+                                WHEN model LIKE '%opus-4%' THEN ${OPUS_INPUT} / 1000000
+                                WHEN model LIKE '%sonnet-4%' THEN ${SONNET_INPUT} / 1000000
+                                WHEN model LIKE '%haiku-4%' THEN ${HAIKU_INPUT} / 1000000
+                            END
+                            + COALESCE(output_tokens,0) * CASE
+                                WHEN model LIKE 'gpt-5.6-sol%' THEN ${SOL_OUTPUT} / 1000000
+                                WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_OUTPUT} / 1000000
+                                WHEN model LIKE 'claude-fable-5%' THEN ${FABLE_OUTPUT} / 1000000
+                                WHEN model LIKE 'claude-opus-5%' THEN ${OPUS_5_OUTPUT} / 1000000
+                                WHEN model LIKE 'claude-sonnet-5%' THEN ${SONNET_5_OUTPUT} / 1000000
+                                WHEN model LIKE '%opus-4%' THEN ${OPUS_OUTPUT} / 1000000
+                                WHEN model LIKE '%sonnet-4%' THEN ${SONNET_OUTPUT} / 1000000
+                                WHEN model LIKE '%haiku-4%' THEN ${HAIKU_OUTPUT} / 1000000
+                            END
+                            + COALESCE(cache_read_tokens,0) * CASE
+                                WHEN model LIKE 'gpt-5.6-sol%' THEN ${SOL_CACHE_READ} / 1000000
+                                WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_CACHE_READ} / 1000000
+                                WHEN model LIKE 'claude-fable-5-1%' THEN ${FABLE_5_1_CACHE_READ} / 1000000
+                                WHEN model LIKE 'claude-fable-5%' THEN ${FABLE_CACHE_READ} / 1000000
+                                ELSE 0
+                            END
+                            + COALESCE(cache_creation_tokens,0) * CASE
+                                WHEN model LIKE 'gpt-5.6-sol%' THEN ${SOL_CACHE_WRITE} / 1000000
+                                WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_CACHE_WRITE} / 1000000
+                                WHEN model LIKE 'claude-fable-5%' THEN ${FABLE_CACHE_WRITE} / 1000000
+                                ELSE 0
+                            END
+                        )
+                        WHEN model = '<synthetic>' THEN 0
+                        ELSE NULL
+                    END AS run_cost
+                FROM agent_runs
+                WHERE agent_name LIKE 'interflux:%' AND total_tokens > 0 ${extra}
+            )
             SELECT
                 agent_name,
                 COUNT(*) as runs,
@@ -536,46 +719,11 @@ case "$mode" in
                 CAST(AVG(output_tokens) AS INTEGER) as avg_output,
                 MAX(total_tokens) as max_tokens,
                 ROUND(CAST(AVG(output_tokens) AS REAL) / NULLIF(AVG(total_tokens), 0), 4) as output_ratio,
-                ROUND(
-                    AVG(
-                        COALESCE(input_tokens,0) *
-                        CASE
-                            WHEN model LIKE '%opus-4%' THEN ${OPUS_INPUT} / 1000000
-                            WHEN model LIKE '%sonnet-4%' THEN ${SONNET_INPUT} / 1000000
-                            WHEN model LIKE '%haiku-4%' THEN ${HAIKU_INPUT} / 1000000
-                            ELSE ${SONNET_INPUT} / 1000000
-                        END
-                        +
-                        COALESCE(output_tokens,0) *
-                        CASE
-                            WHEN model LIKE '%opus-4%' THEN ${OPUS_OUTPUT} / 1000000
-                            WHEN model LIKE '%sonnet-4%' THEN ${SONNET_OUTPUT} / 1000000
-                            WHEN model LIKE '%haiku-4%' THEN ${HAIKU_OUTPUT} / 1000000
-                            ELSE ${SONNET_OUTPUT} / 1000000
-                        END
-                    )
-                , 4) as avg_cost_usd,
-                ROUND(
-                    SUM(
-                        COALESCE(input_tokens,0) *
-                        CASE
-                            WHEN model LIKE '%opus-4%' THEN ${OPUS_INPUT} / 1000000
-                            WHEN model LIKE '%sonnet-4%' THEN ${SONNET_INPUT} / 1000000
-                            WHEN model LIKE '%haiku-4%' THEN ${HAIKU_INPUT} / 1000000
-                            ELSE ${SONNET_INPUT} / 1000000
-                        END
-                        +
-                        COALESCE(output_tokens,0) *
-                        CASE
-                            WHEN model LIKE '%opus-4%' THEN ${OPUS_OUTPUT} / 1000000
-                            WHEN model LIKE '%sonnet-4%' THEN ${SONNET_OUTPUT} / 1000000
-                            WHEN model LIKE '%haiku-4%' THEN ${HAIKU_OUTPUT} / 1000000
-                            ELSE ${SONNET_OUTPUT} / 1000000
-                        END
-                    )
-                , 4) as total_cost_usd
-            FROM agent_runs
-            WHERE agent_name LIKE 'interflux:%' AND total_tokens > 0 ${extra}
+                CASE WHEN COUNT(run_cost) = COUNT(*) THEN ROUND(AVG(run_cost), 4) END as avg_cost_usd,
+                CASE WHEN COUNT(run_cost) = COUNT(*) THEN ROUND(SUM(run_cost), 4) END as total_cost_usd,
+                COUNT(*) - COUNT(run_cost) as unpriced_runs,
+                CASE WHEN COUNT(run_cost) = COUNT(*) THEN 'priced' ELSE 'incomplete' END as pricing_status
+            FROM priced_runs
             GROUP BY agent_name
             HAVING runs >= 2
             ORDER BY avg_cost_usd DESC"
