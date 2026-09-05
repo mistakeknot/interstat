@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -13,8 +14,8 @@ DEFAULT_DB_PATH = Path.home() / ".claude" / "interstat" / "metrics.db"
 
 # Pricing per token (not per million). OpenAI rows without observed service-tier
 # metadata are explicitly reported as Standard-equivalent estimates.
-# ORDER MATTERS: get_pricing() prefix-matches, so "claude-fable-5-1" must
-# precede "claude-fable-5" (which is a prefix of it).
+# Claude compatibility uses longest-prefix matching; OpenAI accepts only
+# explicitly priced model IDs and their date-suffixed snapshots.
 PRICING = {
     "gpt-5.6-sol": {
         "input": 4.0e-6,
@@ -124,6 +125,11 @@ def get_pricing(model: str | None) -> dict | None:
         return None
     if model in PRICING:
         return PRICING[model]
+    if model.startswith("gpt-"):
+        for key in PRICING:
+            if key.startswith("gpt-") and re.fullmatch(re.escape(key) + r"-[0-9]{4}-[0-9]{2}-[0-9]{2}", model):
+                return PRICING[key]
+        return None
     # Longest-prefix wins so "claude-fable-5-1" beats "claude-fable-5".
     best_key = ""
     for key in PRICING:

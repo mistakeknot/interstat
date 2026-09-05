@@ -91,6 +91,9 @@ ASTRA_INPUT=10.00; ASTRA_OUTPUT=50.00
 ASTRA_CACHE_READ=1.00; ASTRA_CACHE_WRITE=12.50
 SOL_INPUT=4.00; SOL_OUTPUT=20.00
 SOL_CACHE_READ=0.40; SOL_CACHE_WRITE=5.00
+# Match known OpenAI IDs and dated snapshots only, never arbitrary variants.
+SOL_MODEL_SQL="(model = 'gpt-5.6-sol' OR model GLOB 'gpt-5.6-sol-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')"
+ASTRA_MODEL_SQL="(model = 'gpt-6-astra' OR model GLOB 'gpt-6-astra-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')"
 FABLE_INPUT=10.00; FABLE_OUTPUT=50.00
 FABLE_CACHE_READ=1.00; FABLE_5_1_CACHE_READ=0.25; FABLE_CACHE_WRITE=12.50
 OPUS_5_INPUT=5.00; OPUS_5_OUTPUT=25.00
@@ -132,8 +135,8 @@ usd_cost_query() {
                COALESCE(SUM(total_tokens),0) as total_tokens,
                ROUND(
                    CASE
-                       WHEN model LIKE 'gpt-5.6-sol%'
-                         OR model LIKE 'gpt-6-astra%'
+                       WHEN ${SOL_MODEL_SQL}
+                         OR ${ASTRA_MODEL_SQL}
                          OR model LIKE 'claude-fable-5%'
                          OR model LIKE 'claude-opus-5%'
                          OR model LIKE 'claude-sonnet-5%'
@@ -143,8 +146,8 @@ usd_cost_query() {
                        THEN COALESCE(
                            ${EXACT_COST_EXPR},
                            COALESCE(SUM(input_tokens),0) * CASE
-                               WHEN model LIKE 'gpt-5.6-sol%' THEN ${SOL_INPUT} / 1000000
-                               WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_INPUT} / 1000000
+                               WHEN ${SOL_MODEL_SQL} THEN ${SOL_INPUT} / 1000000
+                               WHEN ${ASTRA_MODEL_SQL} THEN ${ASTRA_INPUT} / 1000000
                                WHEN model LIKE 'claude-fable-5%' THEN ${FABLE_INPUT} / 1000000
                                WHEN model LIKE 'claude-opus-5%' THEN ${OPUS_5_INPUT} / 1000000
                                WHEN model LIKE 'claude-sonnet-5%' THEN ${SONNET_5_INPUT} / 1000000
@@ -153,8 +156,8 @@ usd_cost_query() {
                                WHEN model LIKE '%haiku-4%' THEN ${HAIKU_INPUT} / 1000000
                            END
                            + COALESCE(SUM(output_tokens),0) * CASE
-                               WHEN model LIKE 'gpt-5.6-sol%' THEN ${SOL_OUTPUT} / 1000000
-                               WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_OUTPUT} / 1000000
+                               WHEN ${SOL_MODEL_SQL} THEN ${SOL_OUTPUT} / 1000000
+                               WHEN ${ASTRA_MODEL_SQL} THEN ${ASTRA_OUTPUT} / 1000000
                                WHEN model LIKE 'claude-fable-5%' THEN ${FABLE_OUTPUT} / 1000000
                                WHEN model LIKE 'claude-opus-5%' THEN ${OPUS_5_OUTPUT} / 1000000
                                WHEN model LIKE 'claude-sonnet-5%' THEN ${SONNET_5_OUTPUT} / 1000000
@@ -163,15 +166,15 @@ usd_cost_query() {
                                WHEN model LIKE '%haiku-4%' THEN ${HAIKU_OUTPUT} / 1000000
                            END
                            + COALESCE(SUM(cache_read_tokens),0) * CASE
-                               WHEN model LIKE 'gpt-5.6-sol%' THEN ${SOL_CACHE_READ} / 1000000
-                               WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_CACHE_READ} / 1000000
+                               WHEN ${SOL_MODEL_SQL} THEN ${SOL_CACHE_READ} / 1000000
+                               WHEN ${ASTRA_MODEL_SQL} THEN ${ASTRA_CACHE_READ} / 1000000
                                WHEN model LIKE 'claude-fable-5-1%' THEN ${FABLE_5_1_CACHE_READ} / 1000000
                                WHEN model LIKE 'claude-fable-5%' THEN ${FABLE_CACHE_READ} / 1000000
                                ELSE 0
                            END
                            + COALESCE(SUM(cache_creation_tokens),0) * CASE
-                               WHEN model LIKE 'gpt-5.6-sol%' THEN ${SOL_CACHE_WRITE} / 1000000
-                               WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_CACHE_WRITE} / 1000000
+                               WHEN ${SOL_MODEL_SQL} THEN ${SOL_CACHE_WRITE} / 1000000
+                               WHEN ${ASTRA_MODEL_SQL} THEN ${ASTRA_CACHE_WRITE} / 1000000
                                WHEN model LIKE 'claude-fable-5%' THEN ${FABLE_CACHE_WRITE} / 1000000
                                ELSE 0
                            END
@@ -182,7 +185,7 @@ usd_cost_query() {
                    4
                ) as cost_usd,
                CASE
-                   WHEN model LIKE 'gpt-5.6-sol%' OR model LIKE 'gpt-6-astra%'
+                   WHEN ${SOL_MODEL_SQL} OR ${ASTRA_MODEL_SQL}
                        THEN 'Standard-equivalent'
                    WHEN model LIKE 'claude-fable-5%'
                      OR model LIKE 'claude-opus-5%'
@@ -195,8 +198,8 @@ usd_cost_query() {
                    ELSE 'unpriced'
                END as pricing_basis,
                CASE
-                   WHEN model LIKE 'gpt-5.6-sol%'
-                     OR model LIKE 'gpt-6-astra%'
+                   WHEN ${SOL_MODEL_SQL}
+                     OR ${ASTRA_MODEL_SQL}
                      OR model LIKE 'claude-fable-5%'
                      OR model LIKE 'claude-opus-5%'
                      OR model LIKE 'claude-sonnet-5%'
@@ -661,8 +664,8 @@ case "$mode" in
             WITH priced_runs AS (
                 SELECT *,
                     CASE
-                        WHEN model LIKE 'gpt-5.6-sol%'
-                          OR model LIKE 'gpt-6-astra%'
+                        WHEN ${SOL_MODEL_SQL}
+                          OR ${ASTRA_MODEL_SQL}
                           OR model LIKE 'claude-fable-5%'
                           OR model LIKE 'claude-opus-5%'
                           OR model LIKE 'claude-sonnet-5%'
@@ -672,8 +675,8 @@ case "$mode" in
                         THEN COALESCE(
                             ${EXACT_COST_ROW_EXPR},
                             COALESCE(input_tokens,0) * CASE
-                                WHEN model LIKE 'gpt-5.6-sol%' THEN ${SOL_INPUT} / 1000000
-                                WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_INPUT} / 1000000
+                                WHEN ${SOL_MODEL_SQL} THEN ${SOL_INPUT} / 1000000
+                                WHEN ${ASTRA_MODEL_SQL} THEN ${ASTRA_INPUT} / 1000000
                                 WHEN model LIKE 'claude-fable-5%' THEN ${FABLE_INPUT} / 1000000
                                 WHEN model LIKE 'claude-opus-5%' THEN ${OPUS_5_INPUT} / 1000000
                                 WHEN model LIKE 'claude-sonnet-5%' THEN ${SONNET_5_INPUT} / 1000000
@@ -682,8 +685,8 @@ case "$mode" in
                                 WHEN model LIKE '%haiku-4%' THEN ${HAIKU_INPUT} / 1000000
                             END
                             + COALESCE(output_tokens,0) * CASE
-                                WHEN model LIKE 'gpt-5.6-sol%' THEN ${SOL_OUTPUT} / 1000000
-                                WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_OUTPUT} / 1000000
+                                WHEN ${SOL_MODEL_SQL} THEN ${SOL_OUTPUT} / 1000000
+                                WHEN ${ASTRA_MODEL_SQL} THEN ${ASTRA_OUTPUT} / 1000000
                                 WHEN model LIKE 'claude-fable-5%' THEN ${FABLE_OUTPUT} / 1000000
                                 WHEN model LIKE 'claude-opus-5%' THEN ${OPUS_5_OUTPUT} / 1000000
                                 WHEN model LIKE 'claude-sonnet-5%' THEN ${SONNET_5_OUTPUT} / 1000000
@@ -692,15 +695,15 @@ case "$mode" in
                                 WHEN model LIKE '%haiku-4%' THEN ${HAIKU_OUTPUT} / 1000000
                             END
                             + COALESCE(cache_read_tokens,0) * CASE
-                                WHEN model LIKE 'gpt-5.6-sol%' THEN ${SOL_CACHE_READ} / 1000000
-                                WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_CACHE_READ} / 1000000
+                                WHEN ${SOL_MODEL_SQL} THEN ${SOL_CACHE_READ} / 1000000
+                                WHEN ${ASTRA_MODEL_SQL} THEN ${ASTRA_CACHE_READ} / 1000000
                                 WHEN model LIKE 'claude-fable-5-1%' THEN ${FABLE_5_1_CACHE_READ} / 1000000
                                 WHEN model LIKE 'claude-fable-5%' THEN ${FABLE_CACHE_READ} / 1000000
                                 ELSE 0
                             END
                             + COALESCE(cache_creation_tokens,0) * CASE
-                                WHEN model LIKE 'gpt-5.6-sol%' THEN ${SOL_CACHE_WRITE} / 1000000
-                                WHEN model LIKE 'gpt-6-astra%' THEN ${ASTRA_CACHE_WRITE} / 1000000
+                                WHEN ${SOL_MODEL_SQL} THEN ${SOL_CACHE_WRITE} / 1000000
+                                WHEN ${ASTRA_MODEL_SQL} THEN ${ASTRA_CACHE_WRITE} / 1000000
                                 WHEN model LIKE 'claude-fable-5%' THEN ${FABLE_CACHE_WRITE} / 1000000
                                 ELSE 0
                             END

@@ -109,6 +109,16 @@ def test_unknown_openai_model_is_unpriced_instead_of_using_anthropic_rates():
     assert cost.calc_cost({"input_tokens": 1_000}, None) is None
 
 
+@pytest.mark.parametrize("model", ["gpt-6-astra-pro", "gpt-6-astra-non-reasoning", "gpt-5.6-sol-unknown"])
+def test_unknown_openai_variant_does_not_inherit_base_model_price(model):
+    assert cost.get_pricing(model) is None
+
+
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-5.6-sol"])
+def test_dated_openai_snapshot_retains_its_known_base_price(model):
+    assert cost.get_pricing(model + "-2026-09-03") == cost.get_pricing(model)
+
+
 def test_parse_jsonl_counts_a_streamed_message_once(tmp_path):
     usage = {"input_tokens": 5, "output_tokens": 7, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 3}
     msg = {"role": "assistant", "id": "msg_1", "model": "claude-sonnet-5", "usage": usage}
@@ -489,7 +499,11 @@ def test_cost_report_surfaces_unknown_model_as_unpriced(tmp_path, capsys):
     assert unknown["cost"] is None
 
 
-def test_cost_query_prices_sol_cache_and_labels_unknown_models(tmp_path):
+@pytest.mark.parametrize("unknown_model", [
+    "gpt-7-unknown", "gpt-6-astra-pro", "gpt-6-astra-non-reasoning", "gpt-5.6-sol-unknown",
+])
+@pytest.mark.parametrize("sol_model", ["gpt-5.6-sol", "gpt-5.6-sol-2026-09-03"])
+def test_cost_query_prices_sol_cache_and_labels_unknown_models(tmp_path, unknown_model, sol_model):
     db = tmp_path / "metrics.db"
     connection = sqlite3.connect(db)
     connection.execute(
@@ -506,8 +520,8 @@ def test_cost_query_prices_sol_cache_and_labels_unknown_models(tmp_path):
     connection.executemany(
         "INSERT INTO agent_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            ("2026-09-03T00:00:00Z", "sol", "executor", None, "b1", "execution", 100_000, 10_000, 20_000, 5_000, 110_000, "gpt-5.6-sol"),
-            ("2026-09-03T00:00:00Z", "unknown", "executor", None, "b1", "execution", 100_000, 10_000, 0, 0, 110_000, "gpt-7-unknown"),
+            ("2026-09-03T00:00:00Z", "sol", "executor", None, "b1", "execution", 100_000, 10_000, 20_000, 5_000, 110_000, sol_model),
+            ("2026-09-03T00:00:00Z", "unknown", "executor", None, "b1", "execution", 100_000, 10_000, 0, 0, 110_000, unknown_model),
         ],
     )
     connection.commit()
@@ -523,10 +537,11 @@ def test_cost_query_prices_sol_cache_and_labels_unknown_models(tmp_path):
         env=env,
     )
     rows = {row["model"]: row for row in json.loads(result.stdout)}
-    assert rows["gpt-5.6-sol"]["cost_usd"] == pytest.approx(0.633)
-    assert rows["gpt-5.6-sol"]["pricing_basis"] == "Standard-equivalent"
-    assert rows["gpt-7-unknown"]["cost_usd"] is None
-    assert rows["gpt-7-unknown"]["pricing_status"] == "unpriced"
+    assert rows[sol_model]["cost_usd"] == pytest.approx(0.633)
+    assert rows[sol_model]["pricing_basis"] == "Standard-equivalent"
+    assert rows[unknown_model]["cost_usd"] is None
+    assert rows[unknown_model]["pricing_status"] == "unpriced"
+    assert rows[unknown_model]["pricing_basis"] == "unpriced"
 
     aggregate = subprocess.run(
         ["bash", str(script), "aggregate"],
@@ -549,7 +564,7 @@ def test_cost_query_prices_sol_cache_and_labels_unknown_models(tmp_path):
     assert payload["total_cost_usd"] is None
     assert payload["known_cost_subtotal_usd"] == pytest.approx(0.633)
     assert payload["cost_estimate_complete"] is False
-    assert payload["unpriced_models"] == ["gpt-7-unknown"]
+    assert payload["unpriced_models"] == [unknown_model]
 
     sol_session = subprocess.run(
         ["bash", str(script), "session-cost", "--session=sol"],
@@ -572,4 +587,17 @@ def test_cost_query_prices_sol_cache_and_labels_unknown_models(tmp_path):
     unknown_payload = json.loads(unknown_session.stdout)[0]
     assert unknown_payload["cost_usd"] is None
     assert unknown_payload["cost_estimate_complete"] is False
-    assert unknown_payload["unpriced_models"] == ["gpt-7-unknown"]
+    assert unknown_payload["unpriced_models"] == [unknown_model]
+
+    # The independent effectiveness query must not recover a fabricated rate.
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE agent_runs SET agent_name = 'interflux:reviewer'")
+    effectiveness = subprocess.run(
+        ["bash", str(script), "effectiveness"],
+        check=True, capture_output=True, text=True, env=env,
+    )
+    ranking = json.loads(effectiveness.stdout)[0]
+    assert ranking["avg_cost_usd"] is None
+    assert ranking["total_cost_usd"] is None
+    assert ranking["unpriced_runs"] == 1
+    assert ranking["pricing_status"] == "incomplete"
