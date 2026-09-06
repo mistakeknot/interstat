@@ -9,6 +9,7 @@ diagnostic, not a routing or offload gate.
 Usage:
   profile.py [--days N] [--session ID] [--since ISO] [--until ISO]
              [--completed-tasks N] [--json]
+  profile.py --task-manifest PATH [--json]
 """
 from __future__ import annotations
 
@@ -290,11 +291,22 @@ def main() -> int:
         help="verified tasks completed in this window (for absolute cost/task)",
     )
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--task-manifest", help="exported Intercore task enrollments and explicit evidence bindings")
     ap.add_argument(
         "--attribution",
         help="JSON mapping of Codex session ids to explicit lanes",
     )
     args = ap.parse_args()
+    if args.task_manifest:
+        if args.session or args.since or args.until or args.completed_tasks is not None or args.attribution:
+            ap.error("--task-manifest uses enrolled evidence boundaries; window/count/attribution overrides are not allowed")
+        from task_attribution import collect_manifest
+        try:
+            report = collect_manifest(args.task_manifest)
+        except (OSError, ValueError) as exc:
+            ap.error(str(exc))
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return {"complete": 0, "incomplete": 1, "invalid": 2}[report["measurement_coverage"]]
     if args.completed_tasks is not None and args.completed_tasks <= 0:
         ap.error("--completed-tasks must be greater than zero")
     since = parse_ts(args.since) if args.since else None
