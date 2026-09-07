@@ -268,9 +268,10 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
             PRIMARY KEY (run_id, model, day)
         );
         CREATE INDEX IF NOT EXISTS idx_aru_model_day ON agent_run_usage(model, day);
-        PRAGMA user_version = 7;
         """
     )
+    if conn.execute("PRAGMA user_version").fetchone()[0] < 7:
+        conn.execute("PRAGMA user_version = 7")
     return conn
 
 
@@ -294,6 +295,19 @@ def upsert_agent_run(conn: sqlite3.Connection, run: dict[str, object], parsed_at
                ORDER BY id ASC LIMIT 1""",
             (run["session_id"], run["agent_name"]),
         ).fetchone()
+    # A subagent whose .meta.json is missing keeps its hash name and would match no hook row;
+    # claim the session's oldest unparsed hook row and keep that row's semantic name.
+    keep_name = None
+    if existing is None and run["agent_name"] != "main-session":
+        hook_row = conn.execute(
+            """SELECT id, agent_name FROM agent_runs
+               WHERE session_id = ? AND source_path IS NULL AND parsed_at IS NULL AND subagent_type IS NOT NULL
+               ORDER BY id ASC LIMIT 1""",
+            (run["session_id"],),
+        ).fetchone()
+        if hook_row is not None:
+            existing = (hook_row[0],)
+            keep_name = hook_row[1]
 
     if existing is not None:
         conn.execute(
@@ -315,7 +329,7 @@ def upsert_agent_run(conn: sqlite3.Connection, run: dict[str, object], parsed_at
             """,
             (
                 run["timestamp"],
-                run["agent_name"],
+                keep_name or run["agent_name"],
                 run["input_tokens"],
                 run["output_tokens"],
                 run["cache_read_tokens"],
@@ -371,7 +385,9 @@ def write_session_runs(conn: sqlite3.Connection, session_runs: dict[str, list[di
     for session_id, runs in session_runs.items():
         try:
             conn.execute("BEGIN")
-            for run in runs:
+            # Hook rows are inserted as each Task ends; claim them in the order the runs ended,
+            # not in transcript path order (agent-<hex> names sort randomly).
+            for run in sorted(runs, key=lambda r: str(r["timestamp"])):
                 upsert_agent_run(conn, run, parsed_at)
             conn.commit()
             stored += len(runs)

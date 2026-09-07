@@ -252,7 +252,13 @@ def run_report(
         day_expression = "day"
 
     ttl_unreported_rows = 0
+    pricing_unknown_rows = 0
     if "pricing_unknowns" in columns:
+        pricing_unknown_rows = conn.execute(
+            f"""SELECT COUNT(*) FROM agent_runs
+                WHERE pricing_unknowns IS NOT NULL AND pricing_unknowns != '[]'
+                {f"AND timestamp >= datetime('now', '-{days} days')" if days < 9999 else ""}"""
+        ).fetchone()[0]
         ttl_unreported_rows = conn.execute(
             f"""SELECT COUNT(*) FROM agent_runs
                 WHERE pricing_unknowns LIKE '%"cache_write_ttl_unreported"%'
@@ -458,8 +464,9 @@ def run_report(
                     "total_api_equivalent": total_api_equivalent,
                     "known_cost_subtotal": round(known_cost_subtotal, 2),
                     "cost_estimate_complete": cost_estimate_complete,
-                    "cost_estimate_lower_bound": ttl_unreported_rows > 0,
+                    "cost_estimate_lower_bound": pricing_unknown_rows > 0,
                     "ttl_unreported_rows": ttl_unreported_rows,
+                    "pricing_unknown_rows": pricing_unknown_rows,
                     "unpriced_models": sorted(unpriced_models),
                     "avg_per_day": round(avg_per_day, 2) if avg_per_day is not None else None,
                     "projected_monthly": (
@@ -503,8 +510,8 @@ def run_report(
         print(f"  API-equivalent cost:  ${total_api_equivalent:,.2f}")
         print(f"  Avg per day:          ${avg_per_day:,.2f}")
         print(f"  Projected monthly:    ${projected_monthly:,.2f}")
-    if ttl_unreported_rows:
-        print(f"  Pricing lower bound:  yes ({ttl_unreported_rows:,} row(s) lack cache-write TTL)")
+    if pricing_unknown_rows:
+        print(f"  Pricing lower bound:  yes ({pricing_unknown_rows:,} row(s) carry a pricing unknown; {ttl_unreported_rows:,} lack cache-write TTL)")
     if cost_per_completed_task is not None:
         print(f"  Completed tasks:      {completed_tasks:,}")
         print(f"  Cost/completed task:  ${cost_per_completed_task:,.2f}")

@@ -193,6 +193,8 @@ def collect(
                 c[field] += record[field]
             if "cache_write_ttl_unreported" in record["pricing_unknowns"]:
                 c["ttl_unreported_msgs"] += 1
+            if record["pricing_unknowns"]:
+                c["pricing_unknown_msgs"] += 1
             message_cost = calc_cost(record, get_pricing(model))
             if message_cost is None:
                 c["unpriced_msgs"] += 1
@@ -234,7 +236,7 @@ def summarize(rows: list[dict], completed_tasks: int | None) -> dict:
         if row["lane"] == "main-integrator":
             main_context += row["context_tokens"]
             main_turns += row["msgs"]
-        if row.get("ttl_unreported_msgs", 0) > 0:
+        if row.get("pricing_unknown_msgs", row.get("ttl_unreported_msgs", 0)) > 0:
             pricing_lower_bound = True
     total_out = sum(lane_out.values())
     known_cost_subtotal = sum(lane_cost.values())
@@ -310,6 +312,7 @@ def main() -> int:
         rows.append({"lane": lane, "model": model, "msgs": c["msgs"], "output_tokens": c["output_tokens"],
                      "cache_read_tokens": c["cache_read_tokens"], "cache_creation_tokens": c["cache_creation_tokens"],
                      "ttl_unreported_msgs": c["ttl_unreported_msgs"],
+                     "pricing_unknown_msgs": c["pricing_unknown_msgs"],
                      "input_tokens": c["input_tokens"], "context_tokens": c["context_tokens"],
                      "ctx_per_msg": round(ctx), "cost": round(cost, 2) if cost is not None else None,
                      "pricing_status": "priced" if cost is not None else "unpriced",

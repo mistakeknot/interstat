@@ -29,6 +29,7 @@
 set -euo pipefail
 
 DB="${INTERSTAT_DB:-$HOME/.claude/interstat/metrics.db}"
+INTERSTAT_SESSION_ID_FILE="${INTERSTAT_SESSION_ID_FILE:-/tmp/interstat-session-id}"
 [[ -f "$DB" ]] || { echo "[]"; exit 0; }
 
 mode="${1:-aggregate}"
@@ -120,6 +121,7 @@ fi
 
 # Schema-v7 rows report from their per-model/day breakdown. Rows without a
 # breakdown remain a legacy source, so a mixed database never double-counts.
+_prepare_report_source() {
 REPORT_FROM="agent_runs"
 REPORT_EXTRA="$(_extra_where)"
 REPORT_RUNS_EXPR="COUNT(*)"
@@ -159,6 +161,8 @@ if [[ "$(sqlite3 "$DB" "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='ta
     REPORT_EXTRA=""
     REPORT_RUNS_EXPR="COUNT(DISTINCT run_id)"
 fi
+}
+_prepare_report_source
 
 # USD pricing per million tokens. Claude defaults come from costs.yaml;
 # Astra and Sol use Standard-equivalent rows plus exact ingested cost for
@@ -659,8 +663,8 @@ case "$mode" in
         # USD cost for a specific session — real-time cost display during sprints
         # Auto-detects session_id from /tmp/interstat-session-id if --session= not provided
         sid="$SESSION_FILTER"
-        if [[ -z "$sid" ]] && [[ -f /tmp/interstat-session-id ]]; then
-            sid=$(cat /tmp/interstat-session-id 2>/dev/null || echo "")
+        if [[ -z "$sid" ]] && [[ -f "$INTERSTAT_SESSION_ID_FILE" ]]; then
+            sid=$(cat "$INTERSTAT_SESSION_ID_FILE" 2>/dev/null || echo "")
         fi
         if [[ -z "$sid" ]]; then
             echo '{"error":"--session= required or /tmp/interstat-session-id must exist"}' >&2
@@ -672,6 +676,7 @@ case "$mode" in
             exit 1
         fi
         SESSION_FILTER="$sid"
+        _prepare_report_source
         tokens_json=$(sqlite3 -json "$DB" "
             SELECT
                 '$sid' as session_id,
