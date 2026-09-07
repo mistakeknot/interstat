@@ -12,6 +12,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+from claude_usage import iter_requests
 from cost import calc_cost, get_pricing
 
 RECENT_WINDOW_SECONDS = 5 * 60
@@ -128,150 +129,87 @@ def discover_candidates(conversations_dir: Path, session_filter: str | None, for
 
 
 def parse_jsonl(path: Path, session_hint: str | None, agent_name: str) -> dict[str, object] | None:
-    total_lines = 0
-    failed_lines = 0
-    entries: list[dict[str, object]] = []
-
-    try:
-        handle = path.open("r", encoding="utf-8")
-    except OSError as exc:
-        logging.error("Unable to open %s (%s)", path, exc)
-        return None
-
-    with handle:
-        for line_no, raw_line in enumerate(handle, start=1):
-            line = raw_line.strip()
-            if not line:
-                continue
-            total_lines += 1
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError as exc:
-                failed_lines += 1
-                logging.warning("Malformed JSON in %s:%d (%s)", path, line_no, exc)
-                continue
-            if not isinstance(entry, dict):
-                failed_lines += 1
-                logging.warning("JSON value at %s:%d is not an object", path, line_no)
-                continue
-            entries.append(entry)
-
-    if total_lines == 0:
-        logging.info("Skipping empty file: %s", path)
-        return None
-
-    if failed_lines / total_lines > 0.5:
-        logging.error(
-            "Skipping %s: %d/%d lines failed to parse (over 50%%)",
-            path,
-            failed_lines,
-            total_lines,
-        )
-        return None
-
     session_id = session_hint
-    for entry in entries:
-        candidate = as_str(entry.get("sessionId"))
-        if candidate:
-            session_id = candidate
-            break
-
-    if not session_id:
-        logging.error("Skipping %s: missing sessionId", path)
-        return None
-
-    assistant_entries: list[dict[str, object]] = []
-    for entry in entries:
-        if entry.get("type") != "assistant":
-            continue
-        message = entry.get("message")
-        if not isinstance(message, dict):
-            continue
-        usage = message.get("usage")
-        if not isinstance(usage, dict):
-            continue
-        assistant_entries.append(entry)
-
-    if not assistant_entries:
-        logging.info("Skipping %s: no assistant entries with usage", path)
-        return None
-
     input_tokens = 0
     output_tokens = 0
     cache_read_tokens = 0
     cache_creation_tokens = 0
     api_equivalent_cost_usd: float | None = 0.0
-    model: str | None = None
     timestamp: str | None = None
-
-    # Claude Code writes one JSONL line per content block of a streamed
-    # assistant message; every line repeats the same message.id and the same
-    # usage. Count each message once or a text+tool_use turn is billed twice.
-    seen_message_ids: set[str] = set()
-    # Attribute the file to the model that generated the most output tokens.
-    # The old "last model seen" label mispriced every session that changed
-    # model mid-life, and after <synthetic> was priced at $0 it zeroed whole
-    # sessions whose final message was synthetic. Full per-(file, model) rows
-    # are Sylveste-balk; this keeps the single label truthful.
     output_by_model: dict[str, int] = {}
-    for entry in assistant_entries:
-        message = entry.get("message", {})
-        if not isinstance(message, dict):
-            continue
-        message_id = as_str(message.get("id"))
-        if message_id:
-            if message_id in seen_message_ids:
-                continue
-            seen_message_ids.add(message_id)
-        usage = message.get("usage", {})
-        if not isinstance(usage, dict):
-            continue
-        turn_input = as_int(usage.get("input_tokens"))
-        turn_output = as_int(usage.get("output_tokens"))
-        turn_cache_read = as_int(usage.get("cache_read_input_tokens"))
-        turn_cache_create = as_int(usage.get("cache_creation_input_tokens"))
+    pricing_unknowns: set[str] = set()
+    buckets: dict[tuple[str, str], dict[str, object]] = {}
+    request_count = 0
+
+    for record in iter_requests(path):
+        request_count += 1
+        if session_id is None:
+            session_id = as_str(record.get("session_id"))
+        timestamp = as_str(record.get("timestamp")) or timestamp
+        model_candidate = str(record["model"])
+        turn_input = int(record["input_tokens"])
+        turn_output = int(record["output_tokens"])
+        turn_cache_read = int(record["cache_read_tokens"])
+        turn_cache_create = int(record["cache_creation_tokens"])
         input_tokens += turn_input
         output_tokens += turn_output
         cache_read_tokens += turn_cache_read
         cache_creation_tokens += turn_cache_create
+        output_by_model[model_candidate] = output_by_model.get(model_candidate, 0) + turn_output
+        pricing_unknowns.update(record["pricing_unknowns"])
 
-        model_candidate = as_str(message.get("model"))
-        if model_candidate:
-            output_by_model[model_candidate] = output_by_model.get(model_candidate, 0) + turn_output
-            turn_cost = calc_cost(
-                {
-                    "input_tokens": turn_input,
-                    "output_tokens": turn_output,
-                    "cache_read_tokens": turn_cache_read,
-                    "cache_creation_tokens": turn_cache_create,
-                    "context_tokens": turn_input + turn_cache_read + turn_cache_create,
-                },
-                get_pricing(model_candidate),
-            )
-            if turn_cost is None:
-                api_equivalent_cost_usd = None
-            elif api_equivalent_cost_usd is not None:
-                api_equivalent_cost_usd += turn_cost
+        turn_cost = calc_cost(record, get_pricing(model_candidate))
+        if turn_cost is None:
+            api_equivalent_cost_usd = None
+        elif api_equivalent_cost_usd is not None:
+            api_equivalent_cost_usd += turn_cost
 
-        timestamp_candidate = as_str(entry.get("timestamp"))
-        if timestamp_candidate:
-            timestamp = timestamp_candidate
+        bucket_key = (model_candidate, str(record["day"]))
+        bucket = buckets.setdefault(
+            bucket_key,
+            {
+                "model": model_candidate,
+                "day": str(record["day"]),
+                "requests": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_creation_tokens": 0,
+                "cache_creation_1h_tokens": 0,
+                "ttl_seen": False,
+                "api_equivalent_cost_usd": 0.0,
+            },
+        )
+        bucket["requests"] = int(bucket["requests"]) + 1
+        for field in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"):
+            bucket[field] = int(bucket[field]) + int(record[field])
+        hourly = record["cache_creation_1h_tokens"]
+        if hourly is not None:
+            bucket["ttl_seen"] = True
+            bucket["cache_creation_1h_tokens"] = int(bucket["cache_creation_1h_tokens"]) + int(hourly)
+        if turn_cost is None:
+            bucket["api_equivalent_cost_usd"] = None
+        elif bucket["api_equivalent_cost_usd"] is not None:
+            bucket["api_equivalent_cost_usd"] = float(bucket["api_equivalent_cost_usd"]) + turn_cost
+
+    if request_count == 0:
+        logging.info("Skipping %s: no assistant entries with usage", path)
+        return None
+    if not session_id:
+        logging.error("Skipping %s: missing sessionId", path)
+        return None
 
     real_models = {m: n for m, n in output_by_model.items() if m != "<synthetic>"}
     ranked = real_models or output_by_model
-    if ranked:
-        # max output wins; ties resolve to the later-seen model (dict order)
-        model = max(reversed(list(ranked.items())), key=lambda kv: kv[1])[0]
+    model = max(reversed(list(ranked.items())), key=lambda kv: kv[1])[0]
+    timestamp = timestamp or utc_now_iso()
 
-    if not timestamp:
-        for entry in entries:
-            timestamp_candidate = as_str(entry.get("timestamp"))
-            if timestamp_candidate:
-                timestamp = timestamp_candidate
-                break
-
-    if not timestamp:
-        timestamp = utc_now_iso()
+    usage_breakdown = []
+    for bucket in buckets.values():
+        ttl_seen = bool(bucket.pop("ttl_seen"))
+        if not ttl_seen:
+            bucket["cache_creation_1h_tokens"] = None
+        usage_breakdown.append(bucket)
 
     return {
         "timestamp": timestamp,
@@ -284,7 +222,9 @@ def parse_jsonl(path: Path, session_hint: str | None, agent_name: str) -> dict[s
         "total_tokens": input_tokens + output_tokens,
         "model": model,
         "api_equivalent_cost_usd": api_equivalent_cost_usd,
+        "pricing_unknowns": json.dumps(sorted(pricing_unknowns)),
         "source_path": str(path),
+        "usage_breakdown": usage_breakdown,
     }
 
 
@@ -293,43 +233,69 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA journal_mode=WAL")
-    try:
-        conn.execute("ALTER TABLE agent_runs ADD COLUMN api_equivalent_cost_usd REAL")
-    except sqlite3.OperationalError as exc:
-        if "duplicate column name" not in str(exc):
-            raise
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS agent_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL,
+            session_id TEXT NOT NULL, agent_name TEXT NOT NULL, invocation_id TEXT,
+            subagent_type TEXT, description TEXT, wall_clock_ms INTEGER,
+            result_length INTEGER, input_tokens INTEGER, output_tokens INTEGER,
+            cache_read_tokens INTEGER, cache_creation_tokens INTEGER,
+            total_tokens INTEGER, model TEXT, api_equivalent_cost_usd REAL,
+            parsed_at TEXT, bead_id TEXT DEFAULT '', phase TEXT DEFAULT '',
+            source_path TEXT, pricing_unknowns TEXT
+        )"""
+    )
+    for statement in (
+        "ALTER TABLE agent_runs ADD COLUMN api_equivalent_cost_usd REAL",
+        "ALTER TABLE agent_runs ADD COLUMN source_path TEXT",
+        "ALTER TABLE agent_runs ADD COLUMN pricing_unknowns TEXT",
+    ):
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
+    conn.executescript(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_source_path
+            ON agent_runs(source_path) WHERE source_path IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS agent_run_usage (
+            run_id INTEGER NOT NULL, model TEXT NOT NULL, day TEXT NOT NULL,
+            requests INTEGER NOT NULL, input_tokens INTEGER NOT NULL,
+            output_tokens INTEGER NOT NULL, cache_read_tokens INTEGER NOT NULL,
+            cache_creation_tokens INTEGER NOT NULL,
+            cache_creation_1h_tokens INTEGER, api_equivalent_cost_usd REAL,
+            PRIMARY KEY (run_id, model, day)
+        );
+        CREATE INDEX IF NOT EXISTS idx_aru_model_day ON agent_run_usage(model, day);
+        PRAGMA user_version = 7;
+        """
+    )
     return conn
 
 
 def upsert_agent_run(conn: sqlite3.Connection, run: dict[str, object], parsed_at: str) -> None:
-    # Match strategy: find the hook-inserted row for this session+agent first.
-    # The hook writes subagent_type (e.g., "Explore") as agent_name.
-    # The parser derives agent_name from the JSONL filename (e.g., "a76c7a5").
-    # We try multiple match strategies to find the right row to update.
-
-    # Strategy 1: exact match by session_id + agent_name (hash from filename), unparsed
     existing = conn.execute(
-        "SELECT id FROM agent_runs WHERE session_id = ? AND agent_name = ? AND parsed_at IS NULL ORDER BY id DESC LIMIT 1",
-        (run["session_id"], run["agent_name"]),
+        "SELECT id FROM agent_runs WHERE source_path = ? LIMIT 1",
+        (run["source_path"],),
     ).fetchone()
-
-    # Strategy 2: exact match by session_id + agent_name (hash), already parsed (idempotent re-run)
     if existing is None:
         existing = conn.execute(
-            "SELECT id FROM agent_runs WHERE session_id = ? AND agent_name = ? ORDER BY id DESC LIMIT 1",
+            """SELECT id FROM agent_runs
+               WHERE session_id = ? AND source_path IS NULL AND parsed_at IS NULL
+                 AND (subagent_type = ? OR agent_name = ?)
+               ORDER BY id ASC LIMIT 1""",
+            (run["session_id"], run["agent_name"], run["agent_name"]),
+        ).fetchone()
+    if existing is None:
+        existing = conn.execute(
+            """SELECT id FROM agent_runs
+               WHERE session_id = ? AND source_path IS NULL AND agent_name = ?
+               ORDER BY id ASC LIMIT 1""",
             (run["session_id"], run["agent_name"]),
         ).fetchone()
 
-    # Strategy 3: match hook-inserted row where subagent_type is set but agent_name differs
-    # (hook writes subagent_type as agent_name; parser would create a duplicate without this)
-    if existing is None:
-        existing = conn.execute(
-            "SELECT id FROM agent_runs WHERE session_id = ? AND subagent_type IS NOT NULL AND parsed_at IS NULL ORDER BY id DESC LIMIT 1",
-            (run["session_id"],),
-        ).fetchone()
-
     if existing is not None:
-        # Update token data but NEVER overwrite subagent_type — the hook's value is authoritative
         conn.execute(
             """
             UPDATE agent_runs
@@ -342,6 +308,8 @@ def upsert_agent_run(conn: sqlite3.Connection, run: dict[str, object], parsed_at
                 total_tokens = ?,
                 model = ?,
                 api_equivalent_cost_usd = ?,
+                pricing_unknowns = ?,
+                source_path = ?,
                 parsed_at = ?
             WHERE id = ?
             """,
@@ -355,46 +323,50 @@ def upsert_agent_run(conn: sqlite3.Connection, run: dict[str, object], parsed_at
                 run["total_tokens"],
                 run["model"],
                 run["api_equivalent_cost_usd"],
+                run["pricing_unknowns"],
+                run["source_path"],
                 parsed_at,
                 existing[0],
             ),
         )
-        return
+        run_id = int(existing[0])
+    else:
+        cursor = conn.execute(
+            """INSERT INTO agent_runs (
+                timestamp, session_id, agent_name, input_tokens, output_tokens,
+                cache_read_tokens, cache_creation_tokens, total_tokens, model,
+                api_equivalent_cost_usd, pricing_unknowns, source_path, parsed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                run["timestamp"], run["session_id"], run["agent_name"],
+                run["input_tokens"], run["output_tokens"], run["cache_read_tokens"],
+                run["cache_creation_tokens"], run["total_tokens"], run["model"],
+                run["api_equivalent_cost_usd"], run["pricing_unknowns"],
+                run["source_path"], parsed_at,
+            ),
+        )
+        run_id = int(cursor.lastrowid)
 
-    conn.execute(
-        """
-        INSERT INTO agent_runs (
-            timestamp,
-            session_id,
-            agent_name,
-            input_tokens,
-            output_tokens,
-            cache_read_tokens,
-            cache_creation_tokens,
-            total_tokens,
-            model,
-            api_equivalent_cost_usd,
-            parsed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            run["timestamp"],
-            run["session_id"],
-            run["agent_name"],
-            run["input_tokens"],
-            run["output_tokens"],
-            run["cache_read_tokens"],
-            run["cache_creation_tokens"],
-            run["total_tokens"],
-            run["model"],
-            run["api_equivalent_cost_usd"],
-            parsed_at,
-        ),
-    )
+    conn.execute("DELETE FROM agent_run_usage WHERE run_id = ?", (run_id,))
+    for bucket in run["usage_breakdown"]:
+        conn.execute(
+            """INSERT INTO agent_run_usage (
+                run_id, model, day, requests, input_tokens, output_tokens,
+                cache_read_tokens, cache_creation_tokens,
+                cache_creation_1h_tokens, api_equivalent_cost_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                run_id, bucket["model"], bucket["day"], bucket["requests"],
+                bucket["input_tokens"], bucket["output_tokens"],
+                bucket["cache_read_tokens"], bucket["cache_creation_tokens"],
+                bucket["cache_creation_1h_tokens"], bucket["api_equivalent_cost_usd"],
+            ),
+        )
 
 
-def write_session_runs(conn: sqlite3.Connection, session_runs: dict[str, list[dict[str, object]]]) -> None:
+def write_session_runs(conn: sqlite3.Connection, session_runs: dict[str, list[dict[str, object]]]) -> int:
     parsed_at = utc_now_iso()
+    stored = 0
 
     for session_id, runs in session_runs.items():
         try:
@@ -402,10 +374,12 @@ def write_session_runs(conn: sqlite3.Connection, session_runs: dict[str, list[di
             for run in runs:
                 upsert_agent_run(conn, run, parsed_at)
             conn.commit()
+            stored += len(runs)
             logging.info("Stored %d parsed run(s) for session %s", len(runs), session_id)
         except sqlite3.Error as exc:
             conn.rollback()
             logging.error("Failed DB transaction for session %s: %s", session_id, exc)
+    return stored
 
 
 def prepare_failed_insert_entry(entry: dict[str, object]) -> tuple[object, ...] | None:
@@ -543,6 +517,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Parse Claude JSONL conversation files into SQLite metrics.")
     parser.add_argument("--session", help="Parse only one session id.")
     parser.add_argument("--force", action="store_true", help="Include files modified in the last five minutes (normally skipped).")
+    parser.add_argument(
+        "--backfill",
+        action="store_true",
+        help="Force a complete transcript ingest and print a coverage receipt.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print parsed records without writing to SQLite.")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH, help="SQLite database path override.")
     parser.add_argument(
@@ -561,7 +540,7 @@ def main(argv: list[str]) -> int:
     conversations_dir = args.conversations_dir.expanduser()
     db_path = args.db.expanduser()
 
-    candidates = discover_candidates(conversations_dir, args.session, args.force)
+    candidates = discover_candidates(conversations_dir, args.session, args.force or args.backfill)
     if not candidates:
         logging.info("No JSONL files discovered to parse.")
 
@@ -605,8 +584,30 @@ def main(argv: list[str]) -> int:
 
     conn = connect_db(db_path)
     try:
+        rows_before = conn.execute("SELECT COUNT(*) FROM agent_runs").fetchone()[0]
         replay_failed_inserts(conn, FAILED_INSERTS_PATH)
-        write_session_runs(conn, session_runs)
+        stored_count = write_session_runs(conn, session_runs)
+        if args.backfill:
+            rows_after = conn.execute("SELECT COUNT(*) FROM agent_runs").fetchone()[0]
+            rows_without_source_path = conn.execute(
+                "SELECT COUNT(*) FROM agent_runs WHERE source_path IS NULL"
+            ).fetchone()[0]
+            rows_ttl_unreported = conn.execute(
+                """SELECT COUNT(*) FROM agent_runs
+                   WHERE pricing_unknowns LIKE '%"cache_write_ttl_unreported"%'"""
+            ).fetchone()[0]
+            print(
+                json.dumps(
+                    {
+                        "rows_before": rows_before,
+                        "rows_after": rows_after,
+                        "transcripts_seen": len(candidates),
+                        "transcripts_stored": stored_count,
+                        "rows_without_source_path": rows_without_source_path,
+                        "rows_ttl_unreported": rows_ttl_unreported,
+                    }
+                )
+            )
     finally:
         conn.close()
 

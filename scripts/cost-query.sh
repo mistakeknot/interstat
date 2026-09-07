@@ -118,16 +118,58 @@ if sqlite3 "$DB" "PRAGMA table_info(agent_runs);" | awk -F'|' '$2 == "api_equiva
     EXACT_COST_ROW_EXPR="api_equivalent_cost_usd"
 fi
 
+# Schema-v7 rows report from their per-model/day breakdown. Rows without a
+# breakdown remain a legacy source, so a mixed database never double-counts.
+REPORT_FROM="agent_runs"
+REPORT_EXTRA="$(_extra_where)"
+REPORT_RUNS_EXPR="COUNT(*)"
+if [[ "$(sqlite3 "$DB" "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_run_usage');")" == "1" ]]; then
+    breakdown_extra=""
+    legacy_extra=""
+    if [[ -n "$SINCE" && "$SINCE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2} ]]; then
+        breakdown_extra="$breakdown_extra AND u.day >= substr('$SINCE', 1, 10)"
+        legacy_extra="$legacy_extra AND r.timestamp > '$SINCE'"
+    fi
+    if [[ -n "$BEAD_FILTER" && "$BEAD_FILTER" =~ ^[a-zA-Z0-9_.:-]+$ ]]; then
+        breakdown_extra="$breakdown_extra AND r.bead_id = '$BEAD_FILTER'"
+        legacy_extra="$legacy_extra AND r.bead_id = '$BEAD_FILTER'"
+    fi
+    if [[ -n "$SESSION_FILTER" && "$SESSION_FILTER" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        breakdown_extra="$breakdown_extra AND r.session_id = '$SESSION_FILTER'"
+        legacy_extra="$legacy_extra AND r.session_id = '$SESSION_FILTER'"
+    fi
+    REPORT_FROM="(
+        SELECT r.id AS run_id, r.timestamp, r.session_id, r.agent_name,
+               r.subagent_type, r.bead_id, r.phase, u.model,
+               u.input_tokens, u.output_tokens, u.cache_read_tokens,
+               u.cache_creation_tokens,
+               (u.input_tokens + u.output_tokens) AS total_tokens,
+               u.api_equivalent_cost_usd
+        FROM agent_run_usage u JOIN agent_runs r ON r.id = u.run_id
+        WHERE 1 = 1 $breakdown_extra
+        UNION ALL
+        SELECT r.id AS run_id, r.timestamp, r.session_id, r.agent_name,
+               r.subagent_type, r.bead_id, r.phase, r.model,
+               r.input_tokens, r.output_tokens, r.cache_read_tokens,
+               r.cache_creation_tokens, r.total_tokens,
+               r.api_equivalent_cost_usd
+        FROM agent_runs r
+        WHERE r.id NOT IN (SELECT run_id FROM agent_run_usage) $legacy_extra
+    ) AS usage_rows"
+    REPORT_EXTRA=""
+    REPORT_RUNS_EXPR="COUNT(DISTINCT run_id)"
+fi
+
 # USD pricing per million tokens. Claude defaults come from costs.yaml;
 # Astra and Sol use Standard-equivalent rows plus exact ingested cost for
 # >272K turns. Unknown models are returned as unpriced, never as Sonnet.
 # Used by cost-usd and baseline modes.
 usd_cost_query() {
     local extra
-    extra="$(_extra_where)"
+    extra="$REPORT_EXTRA"
     sqlite3 -json "$DB" "
         SELECT model,
-               COUNT(*) as runs,
+               ${REPORT_RUNS_EXPR} as runs,
                COALESCE(SUM(input_tokens),0) as input_tokens,
                COALESCE(SUM(output_tokens),0) as output_tokens,
                COALESCE(SUM(cache_read_tokens),0) as cache_read_tokens,
@@ -210,7 +252,7 @@ usd_cost_query() {
                        THEN 'priced'
                    ELSE 'unpriced'
                END as pricing_status
-        FROM agent_runs
+        FROM ${REPORT_FROM}
         WHERE total_tokens > 0 AND model IS NOT NULL AND model != ''
               ${extra}
         GROUP BY model
@@ -274,13 +316,13 @@ case "$mode" in
     by-phase-model)
         sqlite3 -json "$DB" "
             SELECT phase, model,
-                   COUNT(*) as runs,
+                   ${REPORT_RUNS_EXPR} as runs,
                    COALESCE(SUM(total_tokens),0) as tokens,
                    COALESCE(SUM(input_tokens),0) as input_tokens,
                    COALESCE(SUM(output_tokens),0) as output_tokens
-            FROM agent_runs
+            FROM ${REPORT_FROM}
             WHERE phase != '' AND total_tokens > 0
-                  AND model IS NOT NULL AND model != '' ${extra}
+                  AND model IS NOT NULL AND model != '' ${REPORT_EXTRA}
             GROUP BY phase, model
             ORDER BY phase, tokens DESC"
         ;;

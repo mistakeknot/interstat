@@ -20,8 +20,10 @@ import glob
 import json
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from claude_usage import iter_requests  # noqa: E402
 from cost import calc_cost, get_pricing  # noqa: E402
 
 PROJECTS_ROOT = os.path.expanduser("~/.claude/projects")
@@ -167,57 +169,35 @@ def collect(
     claude_files = glob.glob(os.path.join(PROJECTS_ROOT, "**", "*.jsonl"), recursive=True)
     codex_files = glob.glob(os.path.join(CODEX_SESSIONS_ROOT, "**", "*.jsonl"), recursive=True)
     if session:
-        claude_files = [f for f in claude_files if session in f]
         codex_files = [f for f in codex_files if session in f]
     agg: dict[tuple[str, str], collections.Counter] = collections.defaultdict(collections.Counter)
-    seen: set[tuple[str, str]] = set()
     for path in claude_files:
         sub_file = is_subagent_file(path)
-        try:
-            handle = open(path, "r", errors="ignore")
-        except OSError:
-            continue
-        with handle:
-            for line in handle:
-                if '"usage"' not in line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                message = entry.get("message") or {}
-                if message.get("role") != "assistant":
-                    continue
-                usage = message.get("usage") or {}
-                if not usage:
-                    continue
-                if session and entry.get("sessionId") not in (None, session):
-                    continue
-                ts = parse_ts(entry.get("timestamp") or "")
-                if ts is None or ts < lo or ts > hi:
-                    continue
-                key = (path, message.get("id") or entry.get("uuid") or "")
-                if key in seen:
-                    continue
-                seen.add(key)
-                lane = "subagent" if (sub_file or entry.get("isSidechain")) else "main-integrator"
-                model = message.get("model") or "unknown"
-                record = normalized_record(lane, model, usage, codex=False)
-                c = agg[(lane, model)]
-                c["msgs"] += 1
-                for field in (
-                    "input_tokens",
-                    "output_tokens",
-                    "cache_read_tokens",
-                    "cache_creation_tokens",
-                    "context_tokens",
-                ):
-                    c[field] += record[field]
-                message_cost = calc_cost(record, get_pricing(model))
-                if message_cost is None:
-                    c["unpriced_msgs"] += 1
-                else:
-                    c["cost"] += message_cost
+        for record in iter_requests(Path(path)):
+            if session and record["session_id"] != session:
+                continue
+            ts = parse_ts(record["timestamp"])
+            if ts is None or ts < lo or ts > hi:
+                continue
+            lane = "subagent" if (sub_file or record["is_sidechain"]) else "main-integrator"
+            model = record["model"]
+            c = agg[(lane, model)]
+            c["msgs"] += 1
+            for field in (
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_creation_tokens",
+                "context_tokens",
+            ):
+                c[field] += record[field]
+            if "cache_write_ttl_unreported" in record["pricing_unknowns"]:
+                c["ttl_unreported_msgs"] += 1
+            message_cost = calc_cost(record, get_pricing(model))
+            if message_cost is None:
+                c["unpriced_msgs"] += 1
+            else:
+                c["cost"] += message_cost
     for path in codex_files:
         for record in iter_codex_usage(path, lo, hi, session_attribution):
             c = agg[(record["lane"], record["model"])]
@@ -244,6 +224,7 @@ def summarize(rows: list[dict], completed_tasks: int | None) -> dict:
     main_context = 0
     main_turns = 0
     cost_estimate_complete = True
+    pricing_lower_bound = False
     for row in rows:
         lane_out[row["lane"]] += row["output_tokens"]
         if row["cost"] is None:
@@ -253,6 +234,8 @@ def summarize(rows: list[dict], completed_tasks: int | None) -> dict:
         if row["lane"] == "main-integrator":
             main_context += row["context_tokens"]
             main_turns += row["msgs"]
+        if row.get("ttl_unreported_msgs", 0) > 0:
+            pricing_lower_bound = True
     total_out = sum(lane_out.values())
     known_cost_subtotal = sum(lane_cost.values())
     total_cost = known_cost_subtotal if cost_estimate_complete else None
@@ -276,6 +259,7 @@ def summarize(rows: list[dict], completed_tasks: int | None) -> dict:
         "total_cost": round(total_cost, 2) if total_cost is not None else None,
         "known_cost_subtotal": round(known_cost_subtotal, 2),
         "cost_estimate_complete": cost_estimate_complete,
+        "pricing_lower_bound": pricing_lower_bound,
     }
 
 
@@ -325,6 +309,7 @@ def main() -> int:
         ctx = c["context_tokens"] / max(c["msgs"], 1)
         rows.append({"lane": lane, "model": model, "msgs": c["msgs"], "output_tokens": c["output_tokens"],
                      "cache_read_tokens": c["cache_read_tokens"], "cache_creation_tokens": c["cache_creation_tokens"],
+                     "ttl_unreported_msgs": c["ttl_unreported_msgs"],
                      "input_tokens": c["input_tokens"], "context_tokens": c["context_tokens"],
                      "ctx_per_msg": round(ctx), "cost": round(cost, 2) if cost is not None else None,
                      "pricing_status": "priced" if cost is not None else "unpriced",
@@ -350,6 +335,8 @@ def main() -> int:
         print(f"Main-thread share of API-equivalent cost: {summary['main_cost_share']*100:.1f}%")
     else:
         print("Main-thread share of API-equivalent cost: unavailable (unpriced models present)")
+    if summary["pricing_lower_bound"]:
+        print("API-equivalent pricing is a lower bound (cache-write TTL was unreported).")
     if summary["main_integrator_context_per_turn"] is not None:
         print(f"Main-integrator context per model turn: {summary['main_integrator_context_per_turn']/1e3:.0f}K")
     else:

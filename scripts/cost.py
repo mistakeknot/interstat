@@ -171,6 +171,9 @@ def calc_cost(row: dict, pricing: dict | None) -> float | None:
         + row.get("output_tokens", 0) * pricing["output"] * output_multiplier
         + row.get("cache_read_tokens", 0) * pricing["cache_read"] * input_multiplier
         + row.get("cache_creation_tokens", 0) * pricing["cache_create"] * input_multiplier
+        + (row.get("cache_creation_1h_tokens") or 0)
+        * (2 * pricing["input"] - pricing["cache_create"])
+        * input_multiplier
     )
 
 
@@ -210,6 +213,9 @@ def run_report(
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     columns = {row[1] for row in conn.execute("PRAGMA table_info(agent_runs)")}
+    has_usage_breakdown = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_run_usage'"
+    ).fetchone() is not None
     exact_cost_select = (
         "CASE WHEN COUNT(api_equivalent_cost_usd) = COUNT(*) "
         "THEN SUM(api_equivalent_cost_usd) ELSE NULL END as exact_cost"
@@ -217,22 +223,54 @@ def run_report(
         else "NULL as exact_cost"
     )
 
-    cutoff_clause = ""
-    if days < 9999:
-        cutoff_clause = f"AND timestamp >= datetime('now', '-{days} days')"
+    cutoff_clause = f"AND timestamp >= datetime('now', '-{days} days')" if days < 9999 else ""
+    run_count = "COUNT(*)"
+    day_expression = "date(timestamp)"
+    source = "agent_runs"
+    if has_usage_breakdown:
+        breakdown_cutoff = f"AND u.day >= date('now', '-{days} days')" if days < 9999 else ""
+        legacy_cutoff = f"AND r.timestamp >= datetime('now', '-{days} days')" if days < 9999 else ""
+        source = f"""(
+            SELECT r.id AS run_id, r.timestamp, u.day, r.agent_name,
+                   u.model, u.input_tokens, u.output_tokens, u.cache_read_tokens,
+                   u.cache_creation_tokens,
+                   (u.input_tokens + u.output_tokens) AS total_tokens,
+                   u.api_equivalent_cost_usd
+            FROM agent_run_usage u
+            JOIN agent_runs r ON r.id = u.run_id
+            WHERE 1 = 1 {breakdown_cutoff}
+            UNION ALL
+            SELECT r.id AS run_id, r.timestamp, date(r.timestamp) AS day,
+                   r.agent_name, r.model, r.input_tokens, r.output_tokens,
+                   r.cache_read_tokens, r.cache_creation_tokens, r.total_tokens,
+                   r.api_equivalent_cost_usd
+            FROM agent_runs r
+            WHERE r.id NOT IN (SELECT run_id FROM agent_run_usage) {legacy_cutoff}
+        )"""
+        cutoff_clause = ""
+        run_count = "COUNT(DISTINCT run_id)"
+        day_expression = "day"
+
+    ttl_unreported_rows = 0
+    if "pricing_unknowns" in columns:
+        ttl_unreported_rows = conn.execute(
+            f"""SELECT COUNT(*) FROM agent_runs
+                WHERE pricing_unknowns LIKE '%"cache_write_ttl_unreported"%'
+                {f"AND timestamp >= datetime('now', '-{days} days')" if days < 9999 else ""}"""
+        ).fetchone()[0]
 
     # Per-model aggregation
     rows = conn.execute(f"""
         SELECT
             COALESCE(model, 'unknown') as model,
-            COUNT(*) as runs,
+            {run_count} as runs,
             COALESCE(SUM(input_tokens), 0) as input_tokens,
             COALESCE(SUM(output_tokens), 0) as output_tokens,
             COALESCE(SUM(cache_read_tokens), 0) as cache_read_tokens,
             COALESCE(SUM(cache_creation_tokens), 0) as cache_creation_tokens,
             COALESCE(SUM(total_tokens), 0) as total_tokens,
             {exact_cost_select}
-        FROM agent_runs
+        FROM {source}
         WHERE total_tokens IS NOT NULL
             {cutoff_clause}
         GROUP BY model
@@ -248,13 +286,13 @@ def run_report(
                 ELSE 'subagent'
             END as lane,
             COALESCE(model, 'unknown') as model,
-            COUNT(*) as runs,
+            {run_count} as runs,
             COALESCE(SUM(input_tokens), 0) as input_tokens,
             COALESCE(SUM(output_tokens), 0) as output_tokens,
             COALESCE(SUM(cache_read_tokens), 0) as cache_read_tokens,
             COALESCE(SUM(cache_creation_tokens), 0) as cache_creation_tokens,
             {exact_cost_select}
-        FROM agent_runs
+        FROM {source}
         WHERE total_tokens IS NOT NULL
             {cutoff_clause}
         GROUP BY lane, model
@@ -263,15 +301,15 @@ def run_report(
     # Daily breakdown
     daily_rows = conn.execute(f"""
         SELECT
-            date(timestamp) as day,
+            {day_expression} as day,
             COALESCE(model, 'unknown') as model,
             COALESCE(SUM(input_tokens), 0) as input_tokens,
             COALESCE(SUM(output_tokens), 0) as output_tokens,
             COALESCE(SUM(cache_read_tokens), 0) as cache_read_tokens,
             COALESCE(SUM(cache_creation_tokens), 0) as cache_creation_tokens,
-            COUNT(*) as runs,
+            {run_count} as runs,
             {exact_cost_select}
-        FROM agent_runs
+        FROM {source}
         WHERE total_tokens IS NOT NULL
             {cutoff_clause}
         GROUP BY day, model
@@ -417,13 +455,11 @@ def run_report(
                 {
                     "period_days": days,
                     "active_days": active_days,
-                    "total_api_equivalent": (
-                        round(total_api_equivalent, 2)
-                        if total_api_equivalent is not None
-                        else None
-                    ),
+                    "total_api_equivalent": total_api_equivalent,
                     "known_cost_subtotal": round(known_cost_subtotal, 2),
                     "cost_estimate_complete": cost_estimate_complete,
+                    "cost_estimate_lower_bound": ttl_unreported_rows > 0,
+                    "ttl_unreported_rows": ttl_unreported_rows,
                     "unpriced_models": sorted(unpriced_models),
                     "avg_per_day": round(avg_per_day, 2) if avg_per_day is not None else None,
                     "projected_monthly": (
@@ -467,6 +503,8 @@ def run_report(
         print(f"  API-equivalent cost:  ${total_api_equivalent:,.2f}")
         print(f"  Avg per day:          ${avg_per_day:,.2f}")
         print(f"  Projected monthly:    ${projected_monthly:,.2f}")
+    if ttl_unreported_rows:
+        print(f"  Pricing lower bound:  yes ({ttl_unreported_rows:,} row(s) lack cache-write TTL)")
     if cost_per_completed_task is not None:
         print(f"  Completed tasks:      {completed_tasks:,}")
         print(f"  Cost/completed task:  ${cost_per_completed_task:,.2f}")

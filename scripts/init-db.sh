@@ -30,7 +30,9 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     api_equivalent_cost_usd REAL,
     parsed_at TEXT,
     bead_id TEXT DEFAULT '',
-    phase TEXT DEFAULT ''
+    phase TEXT DEFAULT '',
+    source_path TEXT,
+    pricing_unknowns TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_runs_session ON agent_runs(session_id);
@@ -147,6 +149,28 @@ SQL
 # conditional pricing (for example Astra's >272K rule) after transcript rows
 # are aggregated into one agent_run.
 sqlite3 "$DB" "ALTER TABLE agent_runs ADD COLUMN api_equivalent_cost_usd REAL;" 2>/dev/null || true
-sqlite3 "$DB" "PRAGMA user_version = 6;"
+
+# Schema v7 migration: transcript identity, pricing caveats, and per-model/day usage.
+sqlite3 "$DB" "ALTER TABLE agent_runs ADD COLUMN source_path TEXT;" 2>/dev/null || true
+sqlite3 "$DB" "ALTER TABLE agent_runs ADD COLUMN pricing_unknowns TEXT;" 2>/dev/null || true
+sqlite3 "$DB" <<'SQL'
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_source_path
+    ON agent_runs(source_path) WHERE source_path IS NOT NULL;
+CREATE TABLE IF NOT EXISTS agent_run_usage (
+    run_id INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    day TEXT NOT NULL,
+    requests INTEGER NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL,
+    cache_creation_tokens INTEGER NOT NULL,
+    cache_creation_1h_tokens INTEGER,
+    api_equivalent_cost_usd REAL,
+    PRIMARY KEY (run_id, model, day)
+);
+CREATE INDEX IF NOT EXISTS idx_aru_model_day ON agent_run_usage(model, day);
+PRAGMA user_version = 7;
+SQL
 
 echo "interstat: database initialized at $DB"

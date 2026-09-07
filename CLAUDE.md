@@ -62,8 +62,10 @@ For session search, timeline, context, and export: use `/intersearch:session-sea
 ## Token Metrics Database
 
 - Location: `~/.claude/interstat/metrics.db`
-- Schema version: 6 (tracked via `PRAGMA user_version`)
+- Schema version: 7 (tracked via `PRAGMA user_version`)
 - WAL mode enabled for concurrent access
 - `busy_timeout=5000` to handle parallel hook writes
 - Correlation columns: `bead_id TEXT`, `phase TEXT` (schema v3)
 - Exact pricing column: `api_equivalent_cost_usd REAL` (schema v6), computed per response before aggregation so conditional long-context pricing remains correct
+- Transcript identity and pricing caveats: `source_path TEXT` uniquely keys parsed transcript rows and `pricing_unknowns TEXT` records a JSON array (schema v7)
+- Per-transcript/model/day usage: `agent_run_usage` stores token totals, request counts, explicit 1h cache writes, and API-equivalent cost while reports retain legacy `agent_runs` rows without breakdowns (schema v7)
