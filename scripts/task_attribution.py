@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 
 from cost import calc_cost, get_pricing
+from startup_evidence import collect_startup
 
 RAW_FIELDS = ("input_tokens", "cached_input_tokens", "cache_write_input_tokens",
               "output_tokens", "reasoning_output_tokens", "total_tokens")
@@ -571,4 +572,5 @@ def collect_manifest(manifest_path):
                   coordinator_coverage="bound" if any(isinstance(b, dict) and b.get("allocation") == "cohort_shared" for b in bindings) else "unbound",
                   cost_per_accepted_task=(result["total_cost"] / accepted if accepted and result["total_cost"] is not None else None),
                   aggregation_semantics="unique provider/thread/response request deltas; shared coordinator counted once; no per-task shared allocation")
+    result['startup'] = collect_startup(manifest.get('startup_evidence', []), bindings, manifest_path.parent)
     return result
