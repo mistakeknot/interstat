@@ -422,6 +422,8 @@ case "$mode" in
             SELECT COUNT(DISTINCT session_id) as session_count,
                    COALESCE(SUM(input_tokens),0) as input_tokens,
                    COALESCE(SUM(output_tokens),0) as output_tokens,
+                   COALESCE(SUM(cache_read_tokens),0) as cache_read_tokens,
+                   COALESCE(SUM(cache_creation_tokens),0) as cache_creation_tokens,
                    COALESCE(SUM(total_tokens),0) as total_tokens,
                    MIN(timestamp) as first_session,
                    MAX(timestamp) as last_session
@@ -432,6 +434,8 @@ case "$mode" in
         total_tokens=$(echo "$tokens_json" | jq -r '.[0].total_tokens // 0')
         total_input=$(echo "$tokens_json" | jq -r '.[0].input_tokens // 0')
         total_output=$(echo "$tokens_json" | jq -r '.[0].output_tokens // 0')
+        total_cache_read=$(echo "$tokens_json" | jq -r '.[0].cache_read_tokens // 0')
+        total_cache_creation=$(echo "$tokens_json" | jq -r '.[0].cache_creation_tokens // 0')
         first_session=$(echo "$tokens_json" | jq -r '.[0].first_session // ""')
         last_session=$(echo "$tokens_json" | jq -r '.[0].last_session // ""')
 
@@ -481,6 +485,8 @@ case "$mode" in
             --argjson total_tokens "$total_tokens" \
             --argjson total_input "$total_input" \
             --argjson total_output "$total_output" \
+            --argjson total_cache_read "$total_cache_read" \
+            --argjson total_cache_creation "$total_cache_creation" \
             --argjson total_usd "${total_usd:-0}" \
             --argjson known_cost_subtotal_usd "$known_cost_subtotal" \
             --argjson cost_estimate_complete "$cost_estimate_complete" \
@@ -500,7 +506,10 @@ case "$mode" in
                 tokens: {
                     total: $total_tokens,
                     input: $total_input,
-                    output: $total_output
+                    output: $total_output,
+                    cache_read: $total_cache_read,
+                    cache_creation: $total_cache_creation,
+                    total_with_cache: ($total_tokens + $total_cache_read + $total_cache_creation)
                 },
                 cost_usd: $total_usd,
                 known_cost_subtotal_usd: $known_cost_subtotal_usd,
