@@ -3,7 +3,7 @@
 setup() {
   TEST_TMP_DIR="$(mktemp -d)"
   export HOME="$TEST_TMP_DIR"
-  export SCRIPT_DIR="/root/projects/Interverse/plugins/interstat/hooks"
+  export SCRIPT_DIR="$(cd "$BATS_TEST_DIRNAME/../hooks" && pwd)"
   HOOK_SCRIPT="${SCRIPT_DIR}/post-task.sh"
   TEST_DB="${HOME}/.claude/interstat/metrics.db"
 }
