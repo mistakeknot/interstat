@@ -14,7 +14,6 @@ INPUT=$(cat)
 session_id="$(printf '%s' "$INPUT" | jq -r '(.session_id // "")' 2>/dev/null || printf '')"
 tool_name="$(printf '%s' "$INPUT" | jq -r '(.tool_name // "")' 2>/dev/null || printf '')"
 tool_input_raw="$(printf '%s' "$INPUT" | jq -c '(.tool_input // {})' 2>/dev/null || printf '{}')"
-tool_output="$(printf '%s' "$INPUT" | jq -r '(.tool_output // "")' 2>/dev/null || printf '')"
 
 [ -z "$session_id" ] && exit 0
 [ -z "$tool_name" ] && exit 0
@@ -48,14 +47,14 @@ if [ "$tool_name" = "$preceding_tool" ]; then
     retry_of_seq=$((seq - 1))
 fi
 
-# Determine outcome from tool output
+# Outcome: PostToolUse fires only when the tool succeeded, so every row written
+# here is a success. Failures arrive through PostToolUseFailure
+# (post-tool-failure.sh). Do not infer an outcome from the payload: the hook
+# input carries `tool_response`, not `tool_output`, so the old empty-output test
+# labelled every call an error (215,594 phantom errors, zero successes, in
+# metrics.db before this change), and sniffing "Error:" in a response is the
+# same mistake tool-time removed after 20,517 false positives.
 outcome="success"
-output_prefix="$(printf '%.500s' "$tool_output")"
-if [ -z "$tool_output" ] || [ "$tool_output" = "null" ]; then
-    outcome="error"
-elif printf '%s' "$output_prefix" | grep -qiE '^(Error:|error:|\{"error")'; then
-    outcome="error"
-fi
 
 # Bead context (reuse existing protocol)
 bead_id=""
